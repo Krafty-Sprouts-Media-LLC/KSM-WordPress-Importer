@@ -1,0 +1,213 @@
+/*
+ * WordPress Importer v2 — Upload / intro page
+ */
+
+/* ── Page header ──────────────────────────────────────────── */
+.wxr-header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 0 0 24px;
+}
+.wxr-header h1 {
+	font-size: 23px;
+	font-weight: 400;
+	margin: 0;
+	padding: 0;
+	line-height: 1.3;
+	color: #1d2327;
+}
+.wxr-header .dashicons {
+	font-size: 28px;
+	width: 28px;
+	height: 28px;
+	color: #2271b1;
+}
+
+/* ── Cards ────────────────────────────────────────────────── */
+.wxr-card {
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	border-radius: 3px;
+	box-shadow: 0 1px 1px rgba(0,0,0,.04);
+	margin: 0 0 20px;
+	padding: 20px 24px;
+}
+.wxr-card p {
+	margin: 0 0 12px;
+	color: #50575e;
+	font-size: 14px;
+	line-height: 1.6;
+}
+.wxr-card p:last-child {
+	margin-bottom: 0;
+}
+
+/* ── Drop zone ────────────────────────────────────────────── */
+#plupload-upload-ui {
+	margin: 0 0 16px;
+}
+#plupload-upload-ui.drag-drop #drag-drop-area {
+	border: 2px dashed #c3c4c7;
+	border-radius: 3px;
+	padding: 40px 20px;
+	text-align: center;
+	background: #f6f7f7;
+	transition: border-color .2s, background .2s;
+	cursor: pointer;
+}
+#plupload-upload-ui.drag-drop #drag-drop-area:hover,
+#plupload-upload-ui.drag-drop.drag-over #drag-drop-area {
+	border-color: #2271b1;
+	background: #f0f6fc;
+}
+#plupload-upload-ui .drag-drop-info {
+	font-size: 16px;
+	font-weight: 500;
+	color: #1d2327;
+	margin: 0 0 6px;
+}
+#plupload-upload-ui .drag-drop-inside p {
+	margin: 6px 0;
+	color: #646970;
+	font-size: 13px;
+}
+#plupload-upload-ui .drag-drop-buttons .button {
+	margin-top: 4px;
+}
+
+/* ── Upload progress ──────────────────────────────────────── */
+#plupload-upload-ui .drag-drop-status {
+	display: none;
+	padding: 24px 20px;
+	text-align: center;
+}
+#plupload-upload-ui .drag-drop-status .media-item {
+	max-width: 320px;
+	margin: 0 auto;
+	background: #f6f7f7;
+	border: 1px solid #c3c4c7;
+	border-radius: 3px;
+	padding: 16px;
+}
+#plupload-upload-ui .media-item .progress {
+	height: 8px;
+	background: #e0e0e0;
+	border-radius: 4px;
+	overflow: hidden;
+	margin: 10px 0 6px;
+}
+#plupload-upload-ui .media-item .progress .bar {
+	height: 100%;
+	background: #2271b1;
+	transition: width .3s ease;
+}
+#plupload-upload-ui .media-item .percent {
+	font-size: 12px;
+	color: #646970;
+}
+
+/* Upload success state */
+.wxr-upload-success {
+	text-align: center;
+	padding: 10px 0;
+}
+.wxr-upload-success p {
+	margin: 0 0 16px;
+	font-size: 14px;
+	color: #1d2327;
+}
+.wxr-upload-success .button-primary {
+	font-size: 15px;
+	padding: 8px 24px;
+	height: auto;
+	line-height: 1.5;
+}
+
+/* Upload progress state */
+.wxr-upload-progress {
+	text-align: center;
+}
+.wxr-upload-filename {
+	font-size: 13px;
+	color: #646970;
+	margin-bottom: 12px;
+}
+
+/* ── Media library button ─────────────────────────────────── */
+.wxr-or-divider {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	margin: 16px 0;
+	color: #646970;
+	font-size: 13px;
+}
+.wxr-or-divider::before,
+.wxr-or-divider::after {
+	content: '';
+	flex: 1;
+	height: 1px;
+	background: #e0e0e0;
+}
+
+/* ── Step 2: settings page ────────────────────────────────── */
+.wxr-summary-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+	gap: 10px;
+	margin: 0 0 4px;
+}
+.wxr-summary-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+	color: #1d2327;
+	padding: 8px 0;
+	border-bottom: 1px solid #f0f0f1;
+}
+.wxr-summary-item .dashicons {
+	color: #646970;
+	flex-shrink: 0;
+}
+.wxr-summary-item strong {
+	font-weight: 600;
+	color: #2271b1;
+}
+
+.wxr-meta-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.wxr-meta-list li {
+	padding: 6px 0;
+	font-size: 13px;
+	color: #50575e;
+	border-bottom: 1px solid #f0f0f1;
+}
+.wxr-meta-list li:last-child {
+	border-bottom: none;
+}
+
+/* ── Author mapping ───────────────────────────────────────── */
+#authors {
+	margin: 0 0 20px;
+	padding: 0;
+}
+#authors li {
+	background: #f6f7f7;
+	border: 1px solid #e0e0e0;
+	border-radius: 3px;
+	padding: 14px 16px;
+	margin-bottom: 8px;
+	list-style: none;
+}
+
+/* ── Responsive ───────────────────────────────────────────── */
+@media screen and (max-width: 600px) {
+	.wxr-summary-grid {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}

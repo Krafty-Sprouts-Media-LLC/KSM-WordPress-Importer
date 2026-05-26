@@ -1,0 +1,13 @@
+# Package Managers
+/vendor
+/node_modules
+
+# Fresh copy reference — local only, not part of the plugin
+.freshcopy/
+
+# Test XML files — not part of the plugin
+*.xml
+
+# Local development
+.DS_Store
+Thumbs.db
