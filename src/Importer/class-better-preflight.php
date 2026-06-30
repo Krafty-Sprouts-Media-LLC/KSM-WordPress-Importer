@@ -45,6 +45,11 @@ class Better_Preflight {
 			);
 		}
 
+		$format = Better_Format_Detector::validate_for_import( $file_path );
+		if ( is_wp_error( $format ) ) {
+			return $format;
+		}
+
 		libxml_use_internal_errors( true );
 		libxml_clear_errors();
 

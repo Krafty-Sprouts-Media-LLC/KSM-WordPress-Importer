@@ -57,7 +57,7 @@ better-wordpress-importer/
       import-progress.js
     css/
       admin.css
-  legacy/
+  .legacy/
     class-wxr-importer.php
     class-wxr-import-ui.php
   tests/
@@ -70,7 +70,7 @@ better-wordpress-importer/
   docs/
 ```
 
-Existing reference folders such as `WordPress-Importer-master/` and `export-media-with-selected-content/` are reference material only. Move them under `legacy/reference/` or exclude them from the plugin build and bootstrap. They must not be loaded by `plugin.php`.
+Existing reference folders such as `WordPress-Importer-master/` and `export-media-with-selected-content/` are reference material only. Keep them under `.legacy/reference/` or exclude them from the plugin build and bootstrap. They must not be loaded by `plugin.php`.
 
 ## Architecture Rule
 

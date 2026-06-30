@@ -201,4 +201,41 @@ class Better_Import_Queue_Item {
 
 		return $item;
 	}
+
+	/**
+	 * Decode gzipped serialized payload from storage.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @return array<string, mixed>|null
+	 */
+	public function get_decoded_payload() {
+		if ( empty( $this->parsed_payload ) ) {
+			return null;
+		}
+
+		$raw = @gzuncompress( $this->parsed_payload );
+		if ( false === $raw ) {
+			return null;
+		}
+
+		$data = @unserialize( $raw, array( 'allowed_classes' => false ) );
+
+		return is_array( $data ) ? $data : null;
+	}
+
+	/**
+	 * Store a parsed payload as gzipped serialized data.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @param array<string, mixed> $payload Parsed entity payload.
+	 *
+	 * @return void
+	 */
+	public function set_encoded_payload( array $payload ) {
+		$serialized            = serialize( $payload );
+		$this->parsed_payload  = gzcompress( $serialized, 5 );
+		$this->payload_hash    = hash( 'sha256', $serialized );
+	}
 }

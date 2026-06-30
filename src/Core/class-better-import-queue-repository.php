@@ -166,4 +166,191 @@ class Better_Import_Queue_Repository {
 
 		return true;
 	}
+
+	/**
+	 * Fetch the next queue item that still needs work.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @param int $job_id Import job ID.
+	 *
+	 * @return Better_Import_Queue_Item|null
+	 */
+	public function get_next_work_item( $job_id ) {
+		global $wpdb;
+
+		$row = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT * FROM {$this->table}
+				WHERE job_id = %d AND status IN ('pending', 'in_progress')
+				ORDER BY entity_index ASC
+				LIMIT 1",
+				absint( $job_id )
+			)
+		);
+
+		if ( ! $row ) {
+			return null;
+		}
+
+		return Better_Import_Queue_Item::from_row( $row );
+	}
+
+	/**
+	 * Persist a queue item row.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @param Better_Import_Queue_Item $item Queue item.
+	 *
+	 * @return true|WP_Error
+	 */
+	public function save( Better_Import_Queue_Item $item ) {
+		global $wpdb;
+
+		$now  = current_time( 'mysql', true );
+		$data = array(
+			'entity_type'    => $item->entity_type,
+			'old_entity_id'  => $item->old_entity_id,
+			'new_entity_id'  => $item->new_entity_id,
+			'status'         => $item->status,
+			'step'           => $item->step,
+			'step_cursor'    => $item->step_cursor,
+			'step_total'     => $item->step_total,
+			'parsed_payload' => $item->parsed_payload,
+			'payload_hash'   => $item->payload_hash,
+			'title'          => $item->title,
+			'attempts'       => $item->attempts,
+			'error_message'  => $item->error_message,
+			'error_code'     => $item->error_code,
+			'last_error_at'  => $item->last_error_at,
+			'updated_at'     => $now,
+		);
+
+		$format = array(
+			'%s', '%s', '%d', '%s', '%s', '%d', '%d', '%s', '%s', '%s', '%d', '%s', '%s', '%s', '%s',
+		);
+
+		if ( $item->id > 0 ) {
+			$result = $wpdb->update(
+				$this->table,
+				$data,
+				array( 'id' => $item->id ),
+				$format,
+				array( '%d' )
+			);
+		} else {
+			$data['job_id']        = $item->job_id;
+			$data['entity_index']  = $item->entity_index;
+			$data['created_at']    = $now;
+			$result                = $wpdb->insert(
+				$this->table,
+				$data,
+				array_merge( array( '%d', '%d', '%s' ), $format )
+			);
+			if ( false !== $result ) {
+				$item->id = (int) $wpdb->insert_id;
+			}
+		}
+
+		if ( false === $result ) {
+			return new WP_Error(
+				'better_importer.queue.save_failed',
+				__( 'Could not save the queue item.', 'better-wordpress-importer' )
+			);
+		}
+
+		$item->updated_at = $now;
+
+		return true;
+	}
+
+	/**
+	 * Count queue rows by status for a job.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @param int    $job_id Import job ID.
+	 * @param string $status Queue status.
+	 *
+	 * @return int
+	 */
+	public function count_by_status( $job_id, $status ) {
+		global $wpdb;
+
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$this->table} WHERE job_id = %d AND status = %s",
+				absint( $job_id ),
+				sanitize_key( $status )
+			)
+		);
+	}
+
+	/**
+	 * Fetch aggregate queue status counts for a job.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @param int $job_id Import job ID.
+	 *
+	 * @return array<string, int>
+	 */
+	public function get_status_summary( $job_id ) {
+		global $wpdb;
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT status, COUNT(*) AS total FROM {$this->table} WHERE job_id = %d GROUP BY status",
+				absint( $job_id )
+			),
+			ARRAY_A
+		);
+
+		$summary = array(
+			'pending'     => 0,
+			'in_progress' => 0,
+			'complete'    => 0,
+			'skipped'     => 0,
+			'failed'      => 0,
+		);
+
+		foreach ( $rows as $row ) {
+			$key = isset( $row['status'] ) ? $row['status'] : '';
+			if ( isset( $summary[ $key ] ) ) {
+				$summary[ $key ] = (int) $row['total'];
+			}
+		}
+
+		return $summary;
+	}
+
+	/**
+	 * Get the current in-progress queue item for display.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @param int $job_id Import job ID.
+	 *
+	 * @return Better_Import_Queue_Item|null
+	 */
+	public function get_active_item( $job_id ) {
+		global $wpdb;
+
+		$row = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT * FROM {$this->table}
+				WHERE job_id = %d AND status = 'in_progress'
+				ORDER BY entity_index ASC
+				LIMIT 1",
+				absint( $job_id )
+			)
+		);
+
+		if ( ! $row ) {
+			return null;
+		}
+
+		return Better_Import_Queue_Item::from_row( $row );
+	}
 }

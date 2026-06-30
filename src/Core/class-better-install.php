@@ -126,7 +126,39 @@ class Better_Install {
 
 		update_option( 'better_importer_db_version', self::DB_VERSION );
 
+		self::maybe_upgrade_from_legacy();
 		self::maybe_flag_legacy_data();
+	}
+
+	/**
+	 * Migrate sites that still carry v3 experimental options/tables.
+	 *
+	 * Installs better_import_* tables and flags legacy data without dropping anything.
+	 *
+	 * @since 1.4.0
+	 *
+	 * @return void
+	 */
+	public static function maybe_upgrade_from_legacy() {
+		if ( ! get_option( 'wxr_importer_db_version' ) ) {
+			return;
+		}
+
+		if ( get_option( 'better_importer_legacy_migrated' ) ) {
+			return;
+		}
+
+		self::maybe_flag_legacy_data();
+		Better_Legacy_Cleanup::unschedule_legacy_cron();
+
+		update_option( 'better_importer_legacy_migrated', current_time( 'mysql', true ) );
+
+		/**
+		 * Fires after the 1.0 engine detects and flags legacy v3 experimental data.
+		 *
+		 * @since 1.4.0
+		 */
+		do_action( 'better_importer.legacy.migrated' );
 	}
 
 	/**
@@ -152,5 +184,45 @@ class Better_Install {
 	 */
 	public static function activate() {
 		self::install_tables();
+		self::schedule_cron();
+	}
+
+	/**
+	 * Register the background batch cron event.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @return void
+	 */
+	public static function schedule_cron() {
+		add_filter( 'cron_schedules', array( __CLASS__, 'register_cron_interval' ) );
+
+		if ( ! wp_next_scheduled( 'better_importer_process_batch' ) ) {
+			wp_schedule_event( time(), 'better_importer_batch_interval', 'better_importer_process_batch' );
+		}
+
+		if ( ! wp_next_scheduled( 'better_importer_cleanup_chunks' ) ) {
+			wp_schedule_event( time(), 'daily', 'better_importer_cleanup_chunks' );
+		}
+	}
+
+	/**
+	 * Add a frequent cron interval for abandoned imports.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @param array<string, array<string, int|string>> $schedules Existing schedules.
+	 *
+	 * @return array<string, array<string, int|string>>
+	 */
+	public static function register_cron_interval( $schedules ) {
+		if ( ! isset( $schedules['better_importer_batch_interval'] ) ) {
+			$schedules['better_importer_batch_interval'] = array(
+				'interval' => 60,
+				'display'  => __( 'Every minute (Better Importer)', 'better-wordpress-importer' ),
+			);
+		}
+
+		return $schedules;
 	}
 }

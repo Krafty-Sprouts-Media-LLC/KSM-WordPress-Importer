@@ -9,7 +9,7 @@
 - **Registered as:** `wordpress` (Tools → Import → WordPress (v2))
 - **Reference:** [humanmade/WordPress-Importer](https://github.com/humanmade/WordPress-Importer) — compatibility reference only, our engine is independent
 - **Text Domain:** `better-wordpress-importer`
-- **Version:** 1.0.0 (fresh start)
+- **Version:** 1.5.0 (1.0 rebuild on `main`; see [Versioning](#versioning-and-releases) below)
 - **Target:** WordPress 5.0+ | PHP 7.4+
 - **License:** GPLv2+
 
@@ -40,7 +40,7 @@ Load the relevant skill before writing code in that domain:
 
 ## Workflow: rebuild phases
 
-Development follows the phased plan in `docs/IMPLEMENTATION.md`. Current phase is **Phase A** (fix manifest cap). Full doc set:
+Development follows the phased plan in `docs/IMPLEMENTATION.md`. **Current phase: G+ / Phase 2 prep** (Phase F shipped in `1.4.0`). Phases A–F are shipped in `1.0.0`–`1.4.0`. Full doc set:
 
 | Doc | Purpose |
 |-----|---------|
@@ -51,6 +51,40 @@ Development follows the phased plan in `docs/IMPLEMENTATION.md`. Current phase i
 | `docs/UI_UX.md` | Screen designs, progress model, pause/resume/cancel, accessibility |
 | `docs/EXPORTER.md` | Export engine, WXR format, Better Package format, background processing |
 | `docs/PACKAGE_FORMAT.md` | `.bwxr` Better Package format specification (JSON schemas, ZIP structure) |
+
+## Versioning and releases
+
+This project follows [Semantic Versioning](https://semver.org/). Release notes live in `CHANGELOG.md`.
+
+### Semver rules (mandatory)
+
+| Bump | When | Example |
+|------|------|---------|
+| **PATCH** `1.x.y` | Bug fixes only, backward compatible | `1.3.1` fixes a cron lock bug |
+| **MINOR** `1.x.0` | New features, backward compatible | `1.4.0` ships Phase F cleanup |
+| **MAJOR** `x.0.0` | Breaking changes | `2.0.0` drops a public API |
+
+**Do not** use patch releases (`1.0.1`, `1.0.2`, `1.0.3`, …) for new rebuild phases. Each implementation phase from `docs/IMPLEMENTATION.md` is a **minor** release (`1.1.0`, `1.2.0`, …), not a patch.
+
+### Phase → version map (1.0 rebuild)
+
+| Phase | Version | What shipped |
+|-------|---------|--------------|
+| A+B | **1.0.0** | `Better_Install`, `Better_Preflight`, job model, queue seeding |
+| C | **1.1.0** | `Better_Import_Processor`, parser, importer, logger, remapper, WP-Cron |
+| D | **1.2.0** | Admin UI, AJAX, templates, assets, pause/resume/status |
+| E | **1.3.0** | `Better_CLI_Command`, `wp better-importer` subcommands |
+| F | **1.4.0** | Legacy cleanup, settings maintenance, guarded v3 migration |
+| G | **1.5.0** | Format detector, chunked browser uploads, chunk dir protection |
+| G+ / Phase 2 | **1.6.0+** | Continue incrementing **minor** per phase unless the change is patch-only |
+
+When starting a new phase:
+
+1. Bump **minor** version in `plugin.php` header and `BETTER_IMPORTER_VERSION`.
+2. Add a new section at the top of `CHANGELOG.md` with today's date (`dd/MM/yyyy`).
+3. Tag new symbols with `@since` matching that minor version (see below).
+
+Patch releases (`1.3.1`, etc.) are only for bug fixes on top of an already-shipped minor — never for new classes, endpoints, or phases.
 
 ## Coding standards
 
@@ -165,15 +199,32 @@ protected function seek_to_item( XMLReader $reader, array $manifest, int $target
 
 #### `@since` tag rules
 
+`@since` is the plugin version when a symbol was **first added**. Never update `@since` when modifying existing code. One `@since` per docblock.
+
 | Location | Required | Value |
 |----------|----------|-------|
-| File-level docblock | Yes | `@since 1.0.0` |
-| Class docblock | Yes | `@since 1.0.0` |
-| Public method | Yes | `@since 1.0.0` |
-| Protected/private non-trivial | Yes | `@since 1.0.0` |
-| Hook registration comment | Yes | `@since 1.0.0` |
-| Property | Recommended | `@since 1.0.0` |
-| New methods after 3.0.0 | Yes | `@since 3.1.0` (actual version) |
+| File-level docblock | Yes | Version when the file was first added |
+| Class docblock | Yes | Version when the class was first added |
+| Public method | Yes | Version when **that method** was first added |
+| Protected/private non-trivial | Yes | Version when **that method** was first added |
+| Hook registration comment | Yes | Version when the hook was first registered |
+| Property | Recommended | Version when the property was first added |
+
+**Debut version by rebuild phase** (use these instead of defaulting everything to `1.0.0`):
+
+| Debut version | Symbols |
+|---------------|---------|
+| `1.0.0` | Phase A+B: install, preflight, job/queue models, `Better_Import_Job::create()`, queue seeding |
+| `1.1.0` | Phase C: processor, parser, importer, logger, remapper, `better_importer_process_batch` cron |
+| `1.2.0` | Phase D: admin UI, AJAX, templates, assets, `to_status_array()`, pause/resume/cancel, queue status helpers |
+| `1.3.0` | Phase E: `Better_CLI_Command`, `better_importer_register_cli()` |
+| `1.4.0` | Phase F: `Better_Legacy_Cleanup`, `Better_Admin_Settings`, `maybe_upgrade_from_legacy()` |
+| `1.5.0` | Phase G: `Better_Format_Detector`, `Better_Chunked_Upload`, chunked upload AJAX + cron |
+| `1.6.0+` | Next phase — use the actual minor version when the symbol ships |
+
+New methods on an existing class get the version **that method** debuted in, not the class file's original version.
+
+Legacy v3.x symbols under `.legacy/` keep their original `@since 3.x.x` tags — do not rewrite them.
 
 #### Properties
 
@@ -291,24 +342,24 @@ Test conventions:
 - Commit messages: imperative, present tense, 50-char subject line
 - The `.gitignore` currently blocks `*.xml`; this needs updating so test fixtures can be committed
 
-## Key files reference
+## Key files reference (1.0 rebuild — active code)
 
 | File | Role | Status |
 |------|------|--------|
-| `plugin.php` | Bootstrap, registration, hooks | Active — will get new AJAX endpoints |
-| `class-wxr-importer.php` | Import engine (parsing, dedup, remapping) | Keep logic, add `import_batch()` |
-| `class-wxr-import-ui.php` | Admin UI controller | Rewrite for job-based UI |
-| `class-command.php` | WP-CLI command | Enhance with subcommands |
-| `class-wxr-import-info.php` | Pre-scan DTO | Extend with item manifest |
-| `class-logger.php` | Logger abstraction | Keep as-is |
-| `class-logger-serversentevents.php` | SSE logger | Deprecate in Phase F |
-| `class-logger-cli.php` | CLI logger | Keep as-is |
-| `class-logger-html.php` | HTML logger | Keep as-is |
-| `templates/*.php` | Admin page templates | Rewrite in Phase D |
-| `assets/import.js` | SSE consumer + progress UI | Replace with polling-based JS |
-| `assets/intro.js` | Plupload upload UI | Keep with minor fixes |
-| `assets/import.css` | Progress page styles | Extend for new UI |
-| `assets/intro.css` | Upload page styles | Keep with minor fixes |
+| `plugin.php` | Bootstrap, cron, WP-CLI registration | Active |
+| `src/Core/class-better-import-job.php` | Job model | Active |
+| `src/Core/class-better-import-processor.php` | Time-based batch engine | Active |
+| `src/Core/class-better-import-queue-repository.php` | Queue persistence | Active |
+| `src/Importer/class-better-preflight.php` | WXR preflight scan | Active |
+| `src/Importer/class-better-importer.php` | Entity import logic | Active |
+| `src/CLI/class-better-cli-command.php` | WP-CLI commands | Active (since 1.3.0) |
+| `src/Core/class-better-legacy-cleanup.php` | Legacy v3 cleanup helpers | Active (since 1.4.0) |
+| `admin/class-better-admin-settings.php` | Settings / maintenance screen | Active (since 1.4.0) |
+| `admin/class-better-admin-ui.php` | Admin screens | Active |
+| `admin/class-better-import-ajax.php` | AJAX endpoints | Active |
+| `templates/import-*.php`, `templates/history.php`, `templates/settings.php` | Admin templates | Active |
+| `assets/js/import-*.js`, `assets/css/admin.css` | Progress/upload UI | Active |
+| `.legacy/` | Frozen v3 reference code | Not loaded — do not extend |
 
 ## Priority order for fixes
 

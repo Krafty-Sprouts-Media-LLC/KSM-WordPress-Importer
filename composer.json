@@ -1,20 +1,19 @@
 {
-	"name"              : "humanmade/wordpress-importer",
-	"description"       : "WordPress importer plugin",
-	"license"           : "GPLv2",
+	"name"              : "krafty-sprouts/better-wordpress-importer",
+	"description"       : "Resumable, batch-based WordPress WXR importer",
+	"license"           : "GPL-2.0-or-later",
 	"authors"           : [
 		{
-			"name"     : "Contributors",
-			"homepage" : "https://github.com/humanmade/WordPress-Importer/graphs/contributors"
+			"name"     : "Krafty Sprouts Media, LLC",
+			"homepage" : "https://github.com/Krafty-Sprouts-Media-LLC/KSM-WordPress-Importer"
 		}
 	],
 	"type"              : "wordpress-plugin",
 	"minimum-stability" : "dev",
 	"prefer-stable"     : true,
 	"support"           : {
-		"wiki"   : "https://github.com/humanmade/WordPress-Importer/wiki",
-		"source" : "https://github.com/humanmade/WordPress-Importer/releases",
-		"issues" : "https://github.com/humanmade/WordPress-Importer/issues"
+		"source" : "https://github.com/Krafty-Sprouts-Media-LLC/KSM-WordPress-Importer",
+		"issues" : "https://github.com/Krafty-Sprouts-Media-LLC/KSM-WordPress-Importer/issues"
 	},
 	"keywords" : [
 		"wordpress",

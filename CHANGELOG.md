@@ -5,6 +5,98 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 30/06/2026
+
+### Added
+- `Better_Format_Detector` — detects WXR XML vs Better Package (`.bwxr`/ZIP) and rejects unsupported formats with a clear message.
+- `Better_Chunked_Upload` — Plupload 8mb chunked assembly into private XML attachments with web-protected session directories under `uploads/better-importer-chunks/`.
+- Daily `better_importer_cleanup_chunks` cron for abandoned chunk sessions.
+- Format validation on preflight scan, local-file path checks, and both single and chunked AJAX uploads.
+
+### Fixed
+- Chunked uploads no longer redirect to settings on partial chunk responses; redirect only happens when `attachment_id` is returned.
+
+### Changed
+- README, CONTRIBUTING, and `composer.json` updated for the 1.0 rebuild; removed obsolete `.travis.yml` and `find-deprecated-usage.php`.
+- Reference copies consolidated under `.legacy/`; duplicate `legacy/` and root `WordPress-Importer-master/` trees removed.
+
+---
+
+## [1.4.3] - 30/06/2026
+
+### Fixed
+- Choose File button did nothing because upload JS required `wp.Uploader` but only `plupload-all` was enqueued. Now loads `wp-plupload` via `wp_enqueue_media()` and `wp_plupload_default_settings()`.
+- Added a native file-input fallback uploader when Plupload is unavailable.
+
+---
+
+## [1.4.2] - 30/06/2026
+
+### Fixed
+- Tools → Import → WordPress (v2) (`admin.php?import=wordpress`) rendered a broken page because `noheader` skipped `admin-header.php` and our UI never loaded it. The importer now loads the admin header inside `render_header()`, matching the legacy pattern.
+- Admin CSS/JS now enqueue on the core import screen (`?import=wordpress`), not only on Tools submenu pages.
+
+---
+
+## [1.4.1] - 30/06/2026
+
+### Fixed
+- Tools → Better Importer and Import History pages returned “Sorry, you are not allowed to access this page” because submenu registration ran on `admin_init` after WordPress had already fired `admin_menu`.
+- Restored `Better_Install::schedule_cron()` in the plugin bootstrap (accidentally dropped during the menu fix).
+
+---
+
+## [1.4.0] - 30/06/2026
+
+### Added
+- Phase F legacy cleanup: `Better_Legacy_Cleanup` detects v3 `wxr_import_*` tables, meta, chunk dirs, diagnostic logs, and legacy cron events.
+- Guarded upgrade path in `Better_Install::maybe_upgrade_from_legacy()` — flags legacy data without auto-dropping tables.
+- Tools → Importer Settings maintenance screen with nonce-protected cleanup actions.
+- WP-CLI legacy alias `wp wxr-importer` delegating to `Better_CLI_Command`.
+
+### Changed
+- Settings tab added to Better Importer admin navigation.
+- `uninstall.php` clears legacy cron hooks and new maintenance options.
+- Diagnostic log files and local test XML exports are gitignored; removed `wxr-upload-debug.log` from the plugin root.
+
+### Security
+- Destructive “drop legacy tables” action requires explicit confirmation checkbox and `manage_options` capability.
+
+---
+
+## [1.3.0] - 30/06/2026
+
+### Added
+- WP-CLI command `wp better-importer import <file>` using the same `Better_Import_Processor` queue engine as AJAX.
+- CLI subcommands: `status`, `cancel`, `list`, and `report`.
+- `--dry-run`, `--no-attachments`, `--default-author`, and `--batch-seconds` flags for CLI imports.
+
+### Changed
+- Release numbering aligned to semver: new feature phases use minor versions (`1.1.0`, `1.2.0`, `1.3.0`), not patch releases.
+- WP-Cron now resumes `remapping` jobs in addition to `queued` and `processing` (paused jobs are still skipped).
+
+---
+
+## [1.2.0] - 30/06/2026
+
+### Added
+- Phase D admin UI: upload, settings, progress, and history screens under Tools → Better Importer.
+- Tools → Import registration as WordPress (v2) pointing at the new importer.
+- AJAX endpoints for upload, preflight, start, batch, status, pause, resume, and cancel.
+- Polling-based progress UI with honest counters, current entity step, activity log, and pause/resume/cancel controls.
+
+---
+
+## [1.1.0] - 30/06/2026
+
+### Added
+- Phase C processing engine: `Better_Import_Processor` with time-based batches, per-entity payloads, and sub-step checkpoints.
+- `Better_WXR_Parser` parses each entity once from XML into a gzipped queue payload.
+- `Better_Importer` creates users, terms, and posts with chunked meta/comment imports.
+- `Better_Logger`, `Better_Import_Remapper`, and WP-Cron hook `better_importer_process_batch`.
+
+---
+
 ## [1.0.0] - 30/06/2026
 
 ### Added

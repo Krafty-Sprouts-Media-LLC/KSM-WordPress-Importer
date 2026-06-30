@@ -17,6 +17,8 @@ $wpdb->query( "DROP TABLE IF EXISTS {$wpdb->prefix}better_import_jobs" );
 delete_option( 'better_importer_db_version' );
 delete_option( 'better_importer_legacy_flagged' );
 delete_option( 'better_importer_legacy_detected_at' );
+delete_option( 'better_importer_legacy_migrated' );
+delete_option( 'better_importer_last_maintenance' );
 
 // Legacy experimental tables are not dropped automatically.
 delete_option( 'wxr_importer_db_version' );
@@ -24,3 +26,6 @@ delete_option( 'wxr_importer_legacy_cleaned' );
 delete_transient( 'wxr_importer_upgrade_notice' );
 
 wp_clear_scheduled_hook( 'better_importer_process_batch' );
+wp_clear_scheduled_hook( 'better_importer_cleanup_chunks' );
+wp_clear_scheduled_hook( 'wxr_importer_process_batch' );
+wp_clear_scheduled_hook( 'wxr_importer_cleanup_chunks' );

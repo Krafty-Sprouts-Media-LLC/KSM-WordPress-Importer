@@ -151,4 +151,142 @@ class Better_Import_Job_Repository {
 
 		return true;
 	}
+
+	/**
+	 * Sync imported/skipped/failed counters from queue rows.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @param Better_Import_Job $job Import job.
+	 *
+	 * @return void
+	 */
+	public function sync_counters_from_queue( Better_Import_Job $job ) {
+		global $wpdb;
+
+		$table = $wpdb->prefix . 'better_import_queue';
+		$rows  = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT entity_type, status, COUNT(*) AS total
+				FROM {$table}
+				WHERE job_id = %d
+				GROUP BY entity_type, status",
+				$job->id
+			),
+			ARRAY_A
+		);
+
+		$job->imported_posts    = 0;
+		$job->imported_users    = 0;
+		$job->imported_terms    = 0;
+		$job->imported_media    = 0;
+		$job->skipped_posts     = 0;
+		$job->skipped_users     = 0;
+		$job->skipped_terms     = 0;
+		$job->skipped_media     = 0;
+		$job->failed_items      = 0;
+
+		foreach ( $rows as $row ) {
+			$type   = isset( $row['entity_type'] ) ? $row['entity_type'] : '';
+			$status = isset( $row['status'] ) ? $row['status'] : '';
+			$total  = isset( $row['total'] ) ? (int) $row['total'] : 0;
+
+			if ( 'complete' === $status ) {
+				if ( 'user' === $type ) {
+					$job->imported_users += $total;
+				} elseif ( 'term' === $type ) {
+					$job->imported_terms += $total;
+				} elseif ( 'attachment' === $type ) {
+					$job->imported_media += $total;
+				} else {
+					$job->imported_posts += $total;
+				}
+			} elseif ( 'skipped' === $status ) {
+				if ( 'user' === $type ) {
+					$job->skipped_users += $total;
+				} elseif ( 'term' === $type ) {
+					$job->skipped_terms += $total;
+				} elseif ( 'attachment' === $type ) {
+					$job->skipped_media += $total;
+				} else {
+					$job->skipped_posts += $total;
+				}
+			} elseif ( 'failed' === $status ) {
+				$job->failed_items += $total;
+			}
+		}
+	}
+
+	/**
+	 * List recent import jobs.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @param int $limit Maximum rows.
+	 *
+	 * @return array<int, Better_Import_Job>
+	 */
+	public function list_recent( $limit = 20 ) {
+		global $wpdb;
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT * FROM {$this->table} ORDER BY id DESC LIMIT %d",
+				absint( $limit )
+			)
+		);
+
+		$jobs = array();
+		foreach ( $rows as $row ) {
+			$jobs[] = Better_Import_Job::from_row( $row );
+		}
+
+		return $jobs;
+	}
+
+	/**
+	 * Get the active job for a user, if any.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @param int $user_id User ID.
+	 *
+	 * @return Better_Import_Job|null
+	 */
+	public function get_active_job_for_user( $user_id ) {
+		global $wpdb;
+
+		$row = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT * FROM {$this->table}
+				WHERE user_id = %d AND status IN ('queued', 'processing', 'paused')
+				ORDER BY id DESC
+				LIMIT 1",
+				absint( $user_id )
+			)
+		);
+
+		if ( ! $row ) {
+			return null;
+		}
+
+		return Better_Import_Job::from_row( $row );
+	}
+
+	/**
+	 * Verify the current user may access a job.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @param Better_Import_Job $job Import job.
+	 *
+	 * @return bool
+	 */
+	public function user_can_access( Better_Import_Job $job ) {
+		if ( current_user_can( 'import' ) && ( 0 === $job->user_id || (int) get_current_user_id() === (int) $job->user_id ) ) {
+			return true;
+		}
+
+		return current_user_can( 'manage_options' );
+	}
 }

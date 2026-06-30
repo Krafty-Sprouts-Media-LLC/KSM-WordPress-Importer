@@ -5,6 +5,10 @@
 # Fresh copy reference — local only, not part of the plugin
 .freshcopy/
 
+# Duplicate reference trees — canonical copy is under .legacy/reference/
+legacy/
+WordPress-Importer-master/
+
 # Test XML files outside fixtures — not part of the plugin
 *.xml
 !tests/fixtures/*.xml
@@ -13,3 +17,5 @@
 .DS_Store
 Thumbs.db
 test-results/
+wxr-upload-debug.log
+healthtian.WordPress.*.xml

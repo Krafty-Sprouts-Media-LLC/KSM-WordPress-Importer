@@ -486,4 +486,189 @@ class Better_Import_Job {
 
 		return is_array( $decoded ) ? $decoded : array();
 	}
+
+	/**
+	 * Read an import option with default.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @param string $key     Option key.
+	 * @param mixed  $default Default value.
+	 *
+	 * @return mixed
+	 */
+	public function get_option( $key, $default = null ) {
+		return array_key_exists( $key, $this->options ) ? $this->options[ $key ] : $default;
+	}
+
+	/**
+	 * Whether the job is in a terminal state.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @return bool
+	 */
+	public function is_terminal() {
+		return in_array( $this->status, array( 'complete', 'failed', 'cancelled' ), true );
+	}
+
+	/**
+	 * Whether the job can accept processing batches.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @return bool
+	 */
+	public function can_process() {
+		return in_array( $this->status, array( 'queued', 'processing', 'remapping' ), true );
+	}
+
+	/**
+	 * Build a status payload for AJAX polling.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @return array<string, mixed>
+	 */
+	public function to_status_array() {
+		$queue_repo   = new Better_Import_Queue_Repository();
+		$queue_counts = $queue_repo->get_status_summary( $this->id );
+		$active_item  = $queue_repo->get_active_item( $this->id );
+		$total        = $this->manifest_entity_total();
+		$finished     = isset( $queue_counts['complete'] ) ? (int) $queue_counts['complete'] : 0;
+		$skipped      = isset( $queue_counts['skipped'] ) ? (int) $queue_counts['skipped'] : 0;
+		$failed       = isset( $queue_counts['failed'] ) ? (int) $queue_counts['failed'] : 0;
+		$partial      = isset( $queue_counts['in_progress'] ) ? (int) $queue_counts['in_progress'] : 0;
+		$pending      = isset( $queue_counts['pending'] ) ? (int) $queue_counts['pending'] : 0;
+		$processed    = $finished + $skipped + $failed;
+
+		$percent = 0;
+		if ( $total > 0 ) {
+			$percent = min( 100, max( 0, (int) floor( ( $processed / $total ) * 100 ) ) );
+			if ( $processed > 0 && 0 === $percent ) {
+				$percent = 1;
+			}
+		}
+
+		$logger = new Better_Logger( $this->id );
+
+		$status = array(
+			'job_id'            => $this->id,
+			'status'            => $this->status,
+			'phase'             => $this->phase,
+			'phase_label'       => $this->phase_label(),
+			'percent'           => $percent,
+			'total_entities'    => $total,
+			'scanned'           => $total,
+			'queued'            => $total,
+			'processed'         => $processed,
+			'pending'           => $pending,
+			'partial'           => $partial,
+			'imported'          => $finished,
+			'skipped'           => $skipped,
+			'failed'            => $failed,
+			'counts'            => array(
+				'total'    => array(
+					'posts'    => $this->total_posts,
+					'media'    => $this->total_media,
+					'terms'    => $this->total_terms,
+					'users'    => $this->total_users,
+					'comments' => $this->total_comments,
+				),
+				'imported' => array(
+					'posts'    => $this->imported_posts,
+					'media'    => $this->imported_media,
+					'terms'    => $this->imported_terms,
+					'users'    => $this->imported_users,
+					'comments' => $this->imported_comments,
+				),
+				'skipped'  => array(
+					'posts'    => $this->skipped_posts,
+					'media'    => $this->skipped_media,
+					'terms'    => $this->skipped_terms,
+					'users'    => $this->skipped_users,
+					'comments' => $this->skipped_comments,
+				),
+			),
+			'current_entity'    => null,
+			'started_at'        => $this->started_at,
+			'completed_at'      => $this->completed_at,
+			'file_title'        => isset( $this->preflight_data['title'] ) ? $this->preflight_data['title'] : '',
+			'logs'              => $logger->get_recent( 15 ),
+			'can_pause'         => in_array( $this->status, array( 'queued', 'processing' ), true ),
+			'can_resume'        => 'paused' === $this->status,
+			'can_cancel'        => ! $this->is_terminal(),
+			'is_complete'       => 'complete' === $this->status,
+			'is_terminal'       => $this->is_terminal(),
+		);
+
+		if ( $active_item ) {
+			$status['current_entity'] = array(
+				'index'       => $active_item->entity_index,
+				'type'        => $active_item->entity_type,
+				'title'       => $active_item->title,
+				'step'        => $active_item->step,
+				'step_cursor' => $active_item->step_cursor,
+				'step_total'  => $active_item->step_total,
+			);
+		}
+
+		return $status;
+	}
+
+	/**
+	 * Human-readable phase label for the UI.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @return string
+	 */
+	public function phase_label() {
+		$labels = array(
+			''          => __( 'Preparing', 'better-wordpress-importer' ),
+			'queueing'  => __( 'Queueing', 'better-wordpress-importer' ),
+			'importing' => __( 'Importing', 'better-wordpress-importer' ),
+			'remapping' => __( 'Remapping', 'better-wordpress-importer' ),
+			'complete'  => __( 'Complete', 'better-wordpress-importer' ),
+		);
+
+		return isset( $labels[ $this->phase ] ) ? $labels[ $this->phase ] : $this->phase;
+	}
+
+	/**
+	 * Pause the import job.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @return void
+	 */
+	public function pause() {
+		$this->status = 'paused';
+		$this->options['pause_requested'] = true;
+	}
+
+	/**
+	 * Resume a paused import job.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @return void
+	 */
+	public function resume() {
+		$this->status = 'processing';
+		$this->phase  = 'importing';
+		unset( $this->options['pause_requested'] );
+	}
+
+	/**
+	 * Cancel the import job.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @return void
+	 */
+	public function cancel() {
+		$this->status       = 'cancelled';
+		$this->completed_at = current_time( 'mysql', true );
+	}
 }

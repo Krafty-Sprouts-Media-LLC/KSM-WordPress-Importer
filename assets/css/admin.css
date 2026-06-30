@@ -1,0 +1,82 @@
+/**
+ * Better WordPress Importer admin styles.
+ *
+ * @package Better_WordPress_Importer
+ * @since 1.2.0
+ */
+
+.better-importer-wrap .better-importer-tabs {
+	margin-bottom: 20px;
+}
+
+.better-importer-card {
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	border-radius: 4px;
+	padding: 20px;
+	margin: 0 0 20px;
+}
+
+.better-importer-dropzone {
+	border: 2px dashed #c3c4c7;
+	border-radius: 4px;
+	padding: 32px;
+	text-align: center;
+}
+
+.better-importer-summary {
+	margin: 0;
+	padding-left: 18px;
+}
+
+.better-importer-progress-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 12px;
+}
+
+.better-importer-progress-bar-wrap {
+	margin: 16px 0;
+}
+
+.better-importer-progress-bar {
+	background: #f0f0f1;
+	border-radius: 999px;
+	height: 16px;
+	overflow: hidden;
+}
+
+.better-importer-progress-bar span {
+	display: block;
+	height: 100%;
+	width: 0;
+	background: #2271b1;
+	transition: width 0.3s ease;
+}
+
+.better-importer-count-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+	gap: 12px;
+	margin: 16px 0;
+}
+
+.better-importer-count-card {
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	padding: 12px;
+	background: #f6f7f7;
+	text-transform: capitalize;
+}
+
+.better-importer-log ul {
+	max-height: 280px;
+	overflow: auto;
+	margin: 0;
+	padding-left: 18px;
+}
+
+.better-importer-log li {
+	margin-bottom: 6px;
+}
