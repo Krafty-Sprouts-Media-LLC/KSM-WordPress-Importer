@@ -5,9 +5,11 @@
 # Fresh copy reference — local only, not part of the plugin
 .freshcopy/
 
-# Test XML files — not part of the plugin
+# Test XML files outside fixtures — not part of the plugin
 *.xml
+!tests/fixtures/*.xml
 
 # Local development
 .DS_Store
 Thumbs.db
+test-results/

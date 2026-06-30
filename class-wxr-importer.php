@@ -48,11 +48,7 @@ class WXR_Importer extends WP_Importer {
 	protected $tags = array();
 	protected $base_url = '';
 
-	// TODO: REMOVE THESE
-	protected $processed_terms = array();
-	protected $processed_posts = array();
-	protected $processed_menu_items = array();
-	protected $menu_item_orphans = array();
+	// Menu items that reference objects not yet imported; retried during remapping.
 	protected $missing_menu_items = array();
 
 	// NEW STYLE
@@ -63,6 +59,22 @@ class WXR_Importer extends WP_Importer {
 
 	protected $url_remap = array();
 	protected $featured_images = array();
+
+	/**
+	 * Attachments queued for deferred download (post_id => data).
+	 *
+	 * @since 3.0.0
+	 * @var array<int, array<string, mixed>>
+	 */
+	protected $pending_attachments = array();
+
+	/**
+	 * Whether import_start() has run for the current batch session.
+	 *
+	 * @since 3.0.0
+	 * @var bool
+	 */
+	protected $import_batch_started = false;
 
 	/**
 	 * Logger instance.
@@ -105,8 +117,12 @@ class WXR_Importer extends WP_Importer {
 			'prefill_existing_terms'    => true,
 			'update_attachment_guids'   => false,
 			'fetch_attachments'         => false,
+			'defer_attachment_download' => false,
 			'aggressive_url_search'     => false,
 			'default_author'            => null,
+			'cache_flush_interval'      => 200,
+			'job_id'                    => 0,
+			'post_meta_chunk_size'      => 25,
 		) );
 	}
 
@@ -206,6 +222,7 @@ class WXR_Importer extends WP_Importer {
 		$this->version = '1.0';
 
 		$data = new WXR_Import_Info();
+		$data->item_positions = array();
 
 		// Track depth so we can read child elements of <item> without expand()
 		$in_item        = false;
@@ -281,6 +298,11 @@ class WXR_Importer extends WP_Importer {
 						// Enter item context — we'll count it when we exit
 						$in_item      = true;
 						$current_type = '';
+						$byte_offset  = 0;
+						if ( defined( 'XMLReader::PROPERTY_BYTE_OFFSET' ) ) {
+							$byte_offset = (int) $reader->getProperty( XMLReader::PROPERTY_BYTE_OFFSET );
+						}
+						$data->item_positions[] = $byte_offset;
 						break;
 
 					case 'wp:category':
@@ -620,6 +642,10 @@ class WXR_Importer extends WP_Importer {
 		// Raise memory limit for large imports — WP will cap this at the server max.
 		wp_raise_memory_limit( 'admin' );
 
+		if ( ! defined( 'WP_IMPORTING' ) ) {
+			define( 'WP_IMPORTING', true );
+		}
+
 		// Suspend bunches of stuff in WP core
 		wp_defer_term_counting( true );
 		wp_defer_comment_counting( true );
@@ -897,7 +923,8 @@ class WXR_Importer extends WP_Importer {
 		}
 
 		$post_exists = $this->post_exists( $data );
-		if ( $post_exists ) {
+		$resume_existing_import = $post_exists ? $this->is_resumable_import_post( (int) $post_exists, $original_id ) : false;
+		if ( $post_exists && ! $resume_existing_import ) {
 			$this->logger->info( sprintf(
 				__( '%s "%s" already exists.', 'wordpress-importer' ),
 				$post_type_object->labels->singular_name,
@@ -981,7 +1008,9 @@ class WXR_Importer extends WP_Importer {
 
 		$postdata = apply_filters( 'wp_import_post_data_processed', $postdata, $data );
 
-		if ( 'attachment' === $postdata['post_type'] ) {
+		if ( $resume_existing_import ) {
+			$post_id = (int) $post_exists;
+		} elseif ( 'attachment' === $postdata['post_type'] ) {
 			if ( ! $this->options['fetch_attachments'] ) {
 				$this->logger->notice( sprintf(
 					__( 'Skipping attachment "%s", fetching attachments disabled' ),
@@ -996,8 +1025,14 @@ class WXR_Importer extends WP_Importer {
 				do_action( 'wxr_importer.process_skipped.post', $data, $meta );
 				return false;
 			}
+
 			$remote_url = ! empty( $data['attachment_url'] ) ? $data['attachment_url'] : $data['guid'];
-			$post_id = $this->process_attachment( $postdata, $meta, $remote_url );
+
+			if ( ! empty( $this->options['defer_attachment_download'] ) ) {
+				$post_id = $this->queue_deferred_attachment( $postdata, $meta, $remote_url, $original_id );
+			} else {
+				$post_id = $this->process_attachment( $postdata, $meta, $remote_url );
+			}
 		} else {
 			$post_id = wp_insert_post( $postdata, true );
 			do_action( 'wp_import_insert_post', $post_id, $original_id, $postdata, $data );
@@ -1023,6 +1058,8 @@ class WXR_Importer extends WP_Importer {
 			do_action( 'wxr_importer.process_failed.post', $post_id, $data, $meta, $comments, $terms );
 			return false;
 		}
+
+		$this->mark_resumable_import_post( $post_id, $original_id );
 
 		// Ensure stickiness is handled correctly too
 		if ( $data['is_sticky'] === '1' ) {
@@ -1071,7 +1108,13 @@ class WXR_Importer extends WP_Importer {
 		}
 
 		$this->process_comments( $comments, $post_id, $data );
-		$this->process_post_meta( $meta, $post_id, $data );
+		$meta_complete = $this->process_post_meta_resumable( $meta, $post_id, $data );
+		if ( ! $meta_complete ) {
+			return array(
+				'post_id'    => (int) $post_id,
+				'incomplete' => true,
+			);
+		}
 
 		if ( 'nav_menu_item' === $data['post_type'] ) {
 			$this->process_menu_item_meta( $post_id, $data, $meta );
@@ -1088,11 +1131,17 @@ class WXR_Importer extends WP_Importer {
 		 */
 		do_action( 'wxr_importer.processed.post', $post_id, $data, $meta, $comments, $terms );
 
-		// Periodically flush the object cache to keep memory usage flat on large imports.
-		// Every 200 posts is a reasonable balance between performance and memory.
-		if ( count( $this->mapping['post'] ) % 200 === 0 ) {
+		$flush_interval = max( 1, (int) $this->options['cache_flush_interval'] );
+		if ( count( $this->mapping['post'] ) % $flush_interval === 0 ) {
 			wp_cache_flush();
 		}
+
+		$this->clear_resumable_import_post( $post_id );
+
+		return array(
+			'post_id'    => (int) $post_id,
+			'incomplete' => false,
+		);
 	}
 
 	/**
@@ -1159,13 +1208,110 @@ class WXR_Importer extends WP_Importer {
 	}
 
 	/**
+	 * Queue an attachment for deferred download after content import.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param array  $post        Attachment post data.
+	 * @param array  $meta        Attachment meta.
+	 * @param string $remote_url  Remote file URL.
+	 * @param int    $original_id Original export post ID.
+	 *
+	 * @return int|WP_Error Post ID on success.
+	 */
+	protected function queue_deferred_attachment( $post, $meta, $remote_url, $original_id ) {
+		$post_id = wp_insert_post( $post, true );
+		if ( is_wp_error( $post_id ) ) {
+			return $post_id;
+		}
+
+		update_post_meta( $post_id, '_wxr_import_pending_attachment_url', esc_url_raw( $remote_url ) );
+
+		$this->pending_attachments[ $post_id ] = array(
+			'remote_url' => $remote_url,
+			'post'       => $post,
+			'meta'       => $meta,
+		);
+
+		$this->logger->info( sprintf(
+			__( 'Queued attachment "%s" for download', 'wordpress-importer' ),
+			$post['post_title']
+		) );
+
+		return $post_id;
+	}
+
+	/**
+	 * Download a batch of deferred attachments.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param int $batch_size Number of attachments per batch.
+	 *
+	 * @return array<string, mixed>
+	 */
+	public function download_pending_attachments_batch( $batch_size = 3 ) {
+		$ids   = array_keys( $this->pending_attachments );
+		$slice = array_slice( $ids, 0, max( 1, (int) $batch_size ) );
+		$done  = 0;
+		$failed = 0;
+
+		foreach ( $slice as $post_id ) {
+			if ( ! isset( $this->pending_attachments[ $post_id ] ) ) {
+				continue;
+			}
+
+			$pending    = $this->pending_attachments[ $post_id ];
+			$remote_url = $pending['remote_url'];
+			$post       = $pending['post'];
+			$meta       = $pending['meta'];
+
+			$result = $this->process_attachment( $post, $meta, $remote_url, $post_id );
+			if ( is_wp_error( $result ) ) {
+				$failed++;
+				$this->logger->warning( sprintf(
+					__( 'Failed to download attachment "%s": %s', 'wordpress-importer' ),
+					$post['post_title'],
+					$result->get_error_message()
+				) );
+			} else {
+				$done++;
+				delete_post_meta( $post_id, '_wxr_import_pending_attachment_url' );
+			}
+
+			unset( $this->pending_attachments[ $post_id ] );
+		}
+
+		return array(
+			'processed'   => $done + $failed,
+			'downloaded'  => $done,
+			'failed'      => $failed,
+			'remaining'   => count( $this->pending_attachments ),
+			'is_complete' => empty( $this->pending_attachments ),
+		);
+	}
+
+	/**
+	 * Get pending deferred attachments.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function get_pending_attachments() {
+		return $this->pending_attachments;
+	}
+
+	/**
 	 * If fetching attachments is enabled then attempt to create a new attachment
 	 *
-	 * @param array $post Attachment post details from WXR
-	 * @param string $url URL to fetch attachment from
+	 * @param array  $post        Attachment post details from WXR.
+	 * @param array  $meta        Attachment meta.
+	 * @param string $url         URL to fetch attachment from.
+	 * @param int    $existing_id Optional existing post ID for deferred downloads.
 	 * @return int|WP_Error Post ID on success, WP_Error otherwise
 	 */
-	protected function process_attachment( $post, $meta, $remote_url ) {
+	protected function process_attachment( $post, $meta, $url, $existing_id = 0 ) {
 		// try to use _wp_attached file for upload folder placement to ensure the same location as the export site
 		// e.g. location is 2003/05/image.jpg but the attachment post_date is 2010/09, see media_handle_upload()
 		$post['upload_date'] = $post['post_date'];
@@ -1181,11 +1327,11 @@ class WXR_Importer extends WP_Importer {
 		}
 
 		// if the URL is absolute, but does not contain address, then upload it assuming base_site_url
-		if ( preg_match( '|^/[\w\W]+$|', $remote_url ) ) {
-			$remote_url = rtrim( $this->base_url, '/' ) . $remote_url;
+		if ( preg_match( '|^/[\w\W]+$|', $url ) ) {
+			$url = rtrim( $this->base_url, '/' ) . $url;
 		}
 
-		$upload = $this->fetch_remote_file( $remote_url, $post );
+		$upload = $this->fetch_remote_file( $url, $post );
 		if ( is_wp_error( $upload ) ) {
 			return $upload;
 		}
@@ -1204,7 +1350,19 @@ class WXR_Importer extends WP_Importer {
 		}
 
 		// as per wp-admin/includes/upload.php
-		$post_id = wp_insert_attachment( $post, $upload['file'] );
+		if ( $existing_id > 0 ) {
+			$post_id = $existing_id;
+			wp_update_post(
+				array(
+					'ID'             => $post_id,
+					'post_mime_type' => $post['post_mime_type'],
+					'guid'           => isset( $post['guid'] ) ? $post['guid'] : '',
+				)
+			);
+			update_attached_file( $post_id, $upload['file'] );
+		} else {
+			$post_id = wp_insert_attachment( $post, $upload['file'] );
+		}
 		if ( is_wp_error( $post_id ) ) {
 			return $post_id;
 		}
@@ -1213,11 +1371,11 @@ class WXR_Importer extends WP_Importer {
 		wp_update_attachment_metadata( $post_id, $attachment_metadata );
 
 		// Map this image URL later if we need to
-		$this->url_remap[ $remote_url ] = $upload['url'];
+		$this->url_remap[ $url ] = $upload['url'];
 
 		// If we have a HTTPS URL, ensure the HTTP URL gets replaced too
-		if ( substr( $remote_url, 0, 8 ) === 'https://' ) {
-			$insecure_url = 'http' . substr( $remote_url, 5 );
+		if ( substr( $url, 0, 8 ) === 'https://' ) {
+			$insecure_url = 'http' . substr( $url, 5 );
 			$this->url_remap[ $insecure_url ] = $upload['url'];
 		}
 
@@ -1306,63 +1464,132 @@ class WXR_Importer extends WP_Importer {
 		}
 
 		foreach ( $meta as $meta_item ) {
-			/**
-			 * Pre-process post meta data.
-			 *
-			 * @param array $meta_item Meta data. (Return empty to skip.)
-			 * @param int $post_id Post the meta is attached to.
-			 */
-			$meta_item = apply_filters( 'wxr_importer.pre_process.post_meta', $meta_item, $post_id );
-			if ( empty( $meta_item ) ) {
-				// Skip this individual meta item, don't abort the whole loop
-				continue;
-			}
-
-			$key = apply_filters( 'import_post_meta_key', $meta_item['key'], $post_id, $post );
-			$value = false;
-
-			if ( '_edit_last' === $key ) {
-				$value = intval( $meta_item['value'] );
-				if ( ! isset( $this->mapping['user'][ $value ] ) ) {
-					// Skip!
-					continue;
-				}
-
-				$value = $this->mapping['user'][ $value ];
-			}
-
-			if ( $key ) {
-				// export gets meta straight from the DB so could have a serialized string
-				if ( ! $value ) {
-					$value = maybe_unserialize( $meta_item['value'] );
-				}
-
-				// If the value is (or contains) an incomplete class object, the source
-				// site had a plugin that isn't installed here. Importing it would cause
-				// a fatal error when WordPress tries to process the value. Skip it.
-				if ( $this->value_has_incomplete_class( $value ) ) {
-					if ( $this->logger ) {
-						$this->logger->warning( sprintf(
-							/* translators: 1: meta key, 2: post ID */
-							__( 'Skipping meta key "%1$s" on post %2$d: contains a serialized object from a plugin that is not installed on this site.', 'wordpress-importer' ),
-							$key,
-							$post_id
-						) );
-					}
-					continue;
-				}
-
-				add_post_meta( $post_id, $key, $value );
-				do_action( 'import_post_meta', $post_id, $key, $value );
-
-				// if the post has a featured image, take note of this in case of remap
-				if ( '_thumbnail_id' === $key ) {
-					$this->featured_images[ $post_id ] = (int) $value;
-				}
-			}
+			$this->process_single_post_meta( $meta_item, $post_id, $post );
 		}
 
 		return true;
+	}
+
+	/**
+	 * Process post meta in resumable chunks for large web imports.
+	 *
+	 * @since 3.0.8
+	 *
+	 * @param array $meta    List of meta data arrays.
+	 * @param int   $post_id Post to associate with.
+	 * @param array $post    Post data.
+	 *
+	 * @return bool Whether all post meta has been processed.
+	 */
+	protected function process_post_meta_resumable( $meta, $post_id, $post ) {
+		if ( empty( $meta ) ) {
+			$this->clear_resumable_import_post( $post_id );
+			return true;
+		}
+
+		$chunk_size = max( 1, (int) $this->options['post_meta_chunk_size'] );
+		if ( empty( $this->options['job_id'] ) || count( $meta ) <= $chunk_size ) {
+			$this->process_post_meta( $meta, $post_id, $post );
+			$this->clear_resumable_import_post( $post_id );
+			return true;
+		}
+
+		$total  = count( $meta );
+		$offset = (int) get_post_meta( $post_id, '_wxr_import_meta_offset', true );
+		$offset = max( 0, min( $offset, $total ) );
+		$end    = min( $total, $offset + $chunk_size );
+
+		update_post_meta( $post_id, '_wxr_import_meta_total', $total );
+
+		for ( $i = $offset; $i < $end; $i++ ) {
+			$this->process_single_post_meta( $meta[ $i ], $post_id, $post );
+			update_post_meta( $post_id, '_wxr_import_meta_offset', $i + 1 );
+		}
+
+		if ( $end < $total ) {
+			if ( $this->logger ) {
+				$this->logger->info( sprintf(
+					/* translators: 1: imported meta count, 2: total meta count, 3: post title */
+					__( 'Imported %1$d of %2$d meta rows for "%3$s"; continuing this post in the next request.', 'wordpress-importer' ),
+					$end,
+					$total,
+					isset( $post['post_title'] ) ? $post['post_title'] : sprintf( 'post %d', $post_id )
+				) );
+			}
+
+			return false;
+		}
+
+		$this->clear_resumable_import_post( $post_id );
+		return true;
+	}
+
+	/**
+	 * Process one post meta row.
+	 *
+	 * @since 3.0.8
+	 *
+	 * @param array $meta_item Meta row.
+	 * @param int   $post_id   Post ID.
+	 * @param array $post      Post data.
+	 *
+	 * @return void
+	 */
+	protected function process_single_post_meta( $meta_item, $post_id, $post ) {
+		/**
+		 * Pre-process post meta data.
+		 *
+		 * @param array $meta_item Meta data. (Return empty to skip.)
+		 * @param int $post_id Post the meta is attached to.
+		 */
+		$meta_item = apply_filters( 'wxr_importer.pre_process.post_meta', $meta_item, $post_id );
+		if ( empty( $meta_item ) ) {
+			return;
+		}
+
+		$key = apply_filters( 'import_post_meta_key', $meta_item['key'], $post_id, $post );
+		$value = false;
+
+		if ( '_edit_last' === $key ) {
+			$value = intval( $meta_item['value'] );
+			if ( ! isset( $this->mapping['user'][ $value ] ) ) {
+				return;
+			}
+
+			$value = $this->mapping['user'][ $value ];
+		}
+
+		if ( ! $key ) {
+			return;
+		}
+
+		// export gets meta straight from the DB so could have a serialized string
+		if ( ! $value ) {
+			$value = maybe_unserialize( $meta_item['value'] );
+		}
+
+		// If the value is (or contains) an incomplete class object, the source
+		// site had a plugin that isn't installed here. Importing it would cause
+		// a fatal error when WordPress tries to process the value. Skip it.
+		if ( $this->value_has_incomplete_class( $value ) ) {
+			if ( $this->logger ) {
+				$this->logger->warning( sprintf(
+					/* translators: 1: meta key, 2: post ID */
+					__( 'Skipping meta key "%1$s" on post %2$d: contains a serialized object from a plugin that is not installed on this site.', 'wordpress-importer' ),
+					$key,
+					$post_id
+				) );
+			}
+			return;
+		}
+
+		add_post_meta( $post_id, $key, $value );
+		do_action( 'import_post_meta', $post_id, $key, $value );
+
+		// if the post has a featured image, take note of this in case of remap
+		if ( '_thumbnail_id' === $key ) {
+			$this->featured_images[ $post_id ] = (int) $value;
+		}
 	}
 
 	/**
@@ -2464,6 +2691,66 @@ class WXR_Importer extends WP_Importer {
 	}
 
 	/**
+	 * Mark a post as owned by the active WXR job for resumable processing.
+	 *
+	 * @since 3.0.8
+	 *
+	 * @param int $post_id     Local post ID.
+	 * @param int $original_id Original WXR post ID.
+	 *
+	 * @return void
+	 */
+	protected function mark_resumable_import_post( $post_id, $original_id ) {
+		if ( empty( $this->options['job_id'] ) ) {
+			return;
+		}
+
+		update_post_meta( $post_id, '_wxr_import_job_id', (int) $this->options['job_id'] );
+		update_post_meta( $post_id, '_wxr_import_original_id', (int) $original_id );
+	}
+
+	/**
+	 * Check whether an existing post belongs to the active import job.
+	 *
+	 * @since 3.0.8
+	 *
+	 * @param int $post_id     Local post ID.
+	 * @param int $original_id Original WXR post ID.
+	 *
+	 * @return bool
+	 */
+	protected function is_resumable_import_post( $post_id, $original_id ) {
+		if ( empty( $this->options['job_id'] ) ) {
+			return false;
+		}
+
+		$job_id = (int) get_post_meta( $post_id, '_wxr_import_job_id', true );
+		if ( $job_id !== (int) $this->options['job_id'] ) {
+			return false;
+		}
+
+		$stored_original_id = (int) get_post_meta( $post_id, '_wxr_import_original_id', true );
+		return $stored_original_id === (int) $original_id;
+	}
+
+	/**
+	 * Clear per-post resumable cursors after the post finishes.
+	 *
+	 * Keeps _wxr_import_job_id until final cleanup so remapping can still scope
+	 * imported posts to this job.
+	 *
+	 * @since 3.0.8
+	 *
+	 * @param int $post_id Local post ID.
+	 *
+	 * @return void
+	 */
+	protected function clear_resumable_import_post( $post_id ) {
+		delete_post_meta( $post_id, '_wxr_import_meta_offset' );
+		delete_post_meta( $post_id, '_wxr_import_meta_total' );
+	}
+
+	/**
 	 * Prefill existing comment data.
 	 *
 	 * @see self::prefill_existing_posts() for justification of why this exists.
@@ -2571,5 +2858,649 @@ class WXR_Importer extends WP_Importer {
 	protected function mark_term_exists( $data, $term_id ) {
 		$exists_key = sha1( $data['taxonomy'] . ':' . $data['slug'] );
 		$this->exists['term'][ $exists_key ] = $term_id;
+	}
+
+	/**
+	 * Mark that import_start() has already run for this session.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param bool $started Whether import has started.
+	 *
+	 * @return void
+	 */
+	public function set_import_started( $started = true ) {
+		$this->import_batch_started = (bool) $started;
+	}
+
+	/**
+	 * Export mapping state for job persistence.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return array<string, mixed>
+	 */
+	public function get_mapping_state() {
+		return array(
+			'mapping'              => $this->mapping,
+			'requires_remapping'   => $this->requires_remapping,
+			'exists'               => $this->exists,
+			'url_remap'            => $this->url_remap,
+			'featured_images'      => $this->featured_images,
+			'user_slug_override'   => $this->user_slug_override,
+			'pending_attachments'  => $this->pending_attachments,
+			'version'              => $this->version,
+			'base_url'             => $this->base_url,
+		);
+	}
+
+	/**
+	 * Restore mapping state from a persisted job.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param array<string, mixed> $state Persisted state.
+	 *
+	 * @return void
+	 */
+	public function set_mapping_state( array $state ) {
+		if ( isset( $state['mapping'] ) && is_array( $state['mapping'] ) ) {
+			$this->mapping = $state['mapping'];
+		}
+		if ( isset( $state['requires_remapping'] ) && is_array( $state['requires_remapping'] ) ) {
+			$this->requires_remapping = $state['requires_remapping'];
+		}
+		if ( isset( $state['exists'] ) && is_array( $state['exists'] ) ) {
+			$this->exists = $state['exists'];
+		}
+		if ( isset( $state['url_remap'] ) && is_array( $state['url_remap'] ) ) {
+			$this->url_remap = $state['url_remap'];
+		}
+		if ( isset( $state['featured_images'] ) && is_array( $state['featured_images'] ) ) {
+			$this->featured_images = $state['featured_images'];
+		}
+		if ( isset( $state['user_slug_override'] ) && is_array( $state['user_slug_override'] ) ) {
+			$this->user_slug_override = $state['user_slug_override'];
+		}
+		if ( ! empty( $state['version'] ) ) {
+			$this->version = $state['version'];
+		}
+		if ( ! empty( $state['base_url'] ) ) {
+			$this->base_url = $state['base_url'];
+		}
+		if ( isset( $state['pending_attachments'] ) && is_array( $state['pending_attachments'] ) ) {
+			$this->pending_attachments = $state['pending_attachments'];
+		}
+	}
+
+	/**
+	 * Build an ordered manifest of importable entities in the WXR file.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param string $file Path to WXR file.
+	 *
+	 * @return array<int, array<string, string>>|WP_Error
+	 */
+	public function build_import_manifest( $file ) {
+		$reader = $this->get_reader( $file );
+		if ( is_wp_error( $reader ) ) {
+			return $reader;
+		}
+
+		$manifest = array();
+
+		while ( $reader->read() ) {
+			if ( XMLReader::ELEMENT !== $reader->nodeType ) {
+				continue;
+			}
+
+			switch ( $reader->name ) {
+				case 'wp:author':
+					$manifest[] = array( 'type' => 'author' );
+					$reader->next( 'wp:author' );
+					break;
+
+				case 'wp:category':
+					$manifest[] = array( 'type' => 'term', 'kind' => 'category' );
+					$reader->next( 'wp:category' );
+					break;
+
+				case 'wp:tag':
+					$manifest[] = array( 'type' => 'term', 'kind' => 'tag' );
+					$reader->next( 'wp:tag' );
+					break;
+
+				case 'wp:term':
+					$manifest[] = array( 'type' => 'term', 'kind' => 'term' );
+					$reader->next( 'wp:term' );
+					break;
+
+				case 'item':
+					$manifest[] = array( 'type' => 'item' );
+					$reader->next( 'item' );
+					break;
+			}
+		}
+
+		return $manifest;
+	}
+
+	/**
+	 * Process a batch of entities from the WXR file.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param string $file         Path to WXR file.
+	 * @param int    $start_index  Zero-based manifest index to start from.
+	 * @param int    $batch_size   Maximum entities to process.
+	 * @param array  $item_manifest         Optional pre-built manifest.
+	 * @param int    $manifest_entity_total Known entity count when manifest is not stored.
+	 *
+	 * @return array<string, mixed>|WP_Error
+	 */
+	public function import_batch( $file, $start_index, $batch_size, $item_manifest = array(), $manifest_entity_total = 0 ) {
+		libxml_use_internal_errors( true );
+		libxml_clear_errors();
+
+		add_filter( 'import_post_meta_key', array( $this, 'is_valid_meta_key' ) );
+		add_filter( 'http_request_timeout', array( &$this, 'bump_request_timeout' ) );
+
+		if ( ! $this->import_batch_started ) {
+			$result = $this->import_start( $file );
+			if ( is_wp_error( $result ) ) {
+				libxml_use_internal_errors( false );
+				return $result;
+			}
+			$this->import_batch_started = true;
+		}
+
+		if ( empty( $item_manifest ) && $manifest_entity_total <= 0 ) {
+			$item_manifest = $this->build_import_manifest( $file );
+			if ( is_wp_error( $item_manifest ) ) {
+				libxml_use_internal_errors( false );
+				return $item_manifest;
+			}
+		}
+
+		$manifest_total = (int) $manifest_entity_total;
+		if ( $manifest_total <= 0 ) {
+			$manifest_total = count( $item_manifest );
+		}
+
+		$reader = $this->get_reader( $file );
+		if ( is_wp_error( $reader ) ) {
+			libxml_use_internal_errors( false );
+			return $reader;
+		}
+
+		$this->version  = '1.0';
+		$this->base_url = '';
+
+		$entity_index   = 0;
+		$batch_count    = 0;
+		$skipped        = 0;
+		$failed         = 0;
+		$incomplete     = false;
+		$counts         = array(
+			'posts'    => 0,
+			'comments' => 0,
+			'terms'    => 0,
+			'users'    => 0,
+			'media'    => 0,
+		);
+		$comments_before = count( $this->mapping['comment'] );
+		$item_results    = array();
+
+		while ( $reader->read() ) {
+			if ( XMLReader::ELEMENT !== $reader->nodeType ) {
+				continue;
+			}
+
+			$importable = in_array(
+				$reader->name,
+				array( 'wp:author', 'wp:category', 'wp:tag', 'wp:term', 'item' ),
+				true
+			);
+
+			if ( ! $importable ) {
+				if ( 'wp:wxr_version' === $reader->name ) {
+					$this->version = $reader->readString();
+					$reader->next();
+				} elseif ( 'wp:base_site_url' === $reader->name ) {
+					$this->base_url = $reader->readString();
+					$reader->next();
+				}
+				continue;
+			}
+
+			if ( $entity_index < $start_index ) {
+				$entity_index++;
+				continue;
+			}
+
+			if ( $batch_count >= $batch_size ) {
+				break;
+			}
+
+			$batch_result = $this->process_manifest_entity( $reader );
+			if ( is_array( $batch_result ) && ! empty( $batch_result['incomplete'] ) ) {
+				$incomplete = true;
+				break;
+			}
+
+			$manifest_entry = isset( $item_manifest[ $entity_index ] ) ? $item_manifest[ $entity_index ] : array();
+			$item_results[] = $this->format_batch_item_record( $batch_result, $manifest_entry );
+
+			if ( is_wp_error( $batch_result ) ) {
+				$failed++;
+			} elseif ( ! empty( $batch_result['skipped'] ) ) {
+				$skipped++;
+			} else {
+				$type = isset( $batch_result['type'] ) ? $batch_result['type'] : '';
+				if ( isset( $counts[ $type ] ) ) {
+					$counts[ $type ]++;
+				}
+			}
+
+			$entity_index++;
+			$batch_count++;
+		}
+
+		$counts['comments'] = count( $this->mapping['comment'] ) - $comments_before;
+
+		if ( $manifest_total > 0 ) {
+			$is_complete = $entity_index >= $manifest_total;
+		} else {
+			// No manifest count — treat a short final batch as end-of-file.
+			$is_complete = ( $batch_count > 0 && $batch_count < $batch_size );
+		}
+
+		return array(
+			'processed'        => $batch_count,
+			'skipped'          => $skipped,
+			'failed'           => $failed,
+			'counts'           => $counts,
+			'item_results'     => $item_results,
+			'next_item_index'  => $entity_index,
+			'is_complete'      => $is_complete,
+			'incomplete'       => $incomplete,
+		);
+	}
+
+	/**
+	 * Inspect one manifest entity without importing it.
+	 *
+	 * Used after a single-entity batch times out to determine whether WordPress
+	 * inserted the post before the request was killed by the web server.
+	 *
+	 * @since 3.0.8
+	 *
+	 * @param string $file        Path to WXR file.
+	 * @param int    $start_index Zero-based manifest index to inspect.
+	 *
+	 * @return array<string, mixed>|WP_Error
+	 */
+	public function inspect_manifest_entity( $file, $start_index ) {
+		libxml_use_internal_errors( true );
+		libxml_clear_errors();
+
+		$reader = $this->get_reader( $file );
+		if ( is_wp_error( $reader ) ) {
+			libxml_use_internal_errors( false );
+			return $reader;
+		}
+
+		$entity_index = 0;
+		while ( $reader->read() ) {
+			if ( XMLReader::ELEMENT !== $reader->nodeType ) {
+				continue;
+			}
+
+			if ( ! in_array( $reader->name, array( 'wp:author', 'wp:category', 'wp:tag', 'wp:term', 'item' ), true ) ) {
+				continue;
+			}
+
+			if ( $entity_index < $start_index ) {
+				$entity_index++;
+				continue;
+			}
+
+			if ( 'item' !== $reader->name ) {
+				return array(
+					'entity_type' => 'wp:author' === $reader->name ? 'users' : 'terms',
+					'title'       => sprintf( 'XML entity %d', $start_index ),
+				);
+			}
+
+			$node = $this->safe_expand( $reader, 'item' );
+			if ( false === $node ) {
+				libxml_use_internal_errors( false );
+				return new WP_Error( 'wxr_importer.inspect.bad_item', __( 'Malformed item node.', 'wordpress-importer' ) );
+			}
+
+			$parsed = $this->parse_post_node( $node );
+			if ( is_wp_error( $parsed ) ) {
+				libxml_use_internal_errors( false );
+				return $parsed;
+			}
+
+			$post_type = isset( $parsed['data']['post_type'] ) ? $parsed['data']['post_type'] : 'post';
+			$old_id    = isset( $parsed['data']['post_id'] ) ? (string) $parsed['data']['post_id'] : '';
+			$title     = isset( $parsed['data']['post_title'] ) ? (string) $parsed['data']['post_title'] : sprintf( 'XML entity %d', $start_index );
+			$type      = 'attachment' === $post_type ? 'media' : 'posts';
+			$new_id    = null;
+
+			if ( 'attachment' !== $post_type ) {
+				$existing = $this->post_exists( $parsed['data'] );
+				$new_id   = $existing ? (int) $existing : null;
+			}
+
+			libxml_use_internal_errors( false );
+
+			return array(
+				'entity_type' => $type,
+				'old_id'      => $old_id,
+				'title'       => $title,
+				'new_id'      => $new_id,
+			);
+		}
+
+		libxml_use_internal_errors( false );
+
+		return new WP_Error( 'wxr_importer.inspect.not_found', __( 'The XML entity could not be found.', 'wordpress-importer' ) );
+	}
+
+	/**
+	 * Format a batch entity result for per-item tracking.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param array<string, mixed>|WP_Error $batch_result   Entity result.
+	 * @param array<string, mixed>          $manifest_entry Manifest entry.
+	 *
+	 * @return array<string, mixed>
+	 */
+	protected function format_batch_item_record( $batch_result, array $manifest_entry ) {
+		$entity_type = 'posts';
+		if ( is_array( $batch_result ) && ! empty( $batch_result['type'] ) ) {
+			$entity_type = $batch_result['type'];
+		} elseif ( ! empty( $manifest_entry['type'] ) ) {
+			$type_map = array(
+				'author' => 'users',
+				'item'   => 'posts',
+				'term'   => 'terms',
+			);
+			$entity_type = isset( $type_map[ $manifest_entry['type'] ] ) ? $type_map[ $manifest_entry['type'] ] : 'posts';
+		}
+
+		if ( is_wp_error( $batch_result ) ) {
+			return array(
+				'entity_type'   => $entity_type,
+				'old_id'        => '',
+				'title'         => '',
+				'new_id'        => null,
+				'status'        => 'failed',
+				'error_message' => $batch_result->get_error_message(),
+			);
+		}
+
+		$status = ! empty( $batch_result['skipped'] ) ? 'skipped' : 'imported';
+
+		return array(
+			'entity_type'   => $entity_type,
+			'old_id'        => isset( $batch_result['old_id'] ) ? (string) $batch_result['old_id'] : '',
+			'title'         => isset( $batch_result['title'] ) ? (string) $batch_result['title'] : '',
+			'new_id'        => isset( $batch_result['new_id'] ) ? (int) $batch_result['new_id'] : null,
+			'status'        => $status,
+			'error_message' => '',
+		);
+	}
+
+	/**
+	 * Process a single importable entity at the current reader position.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param XMLReader $reader Active reader positioned on an importable element.
+	 *
+	 * @return array<string, mixed>|WP_Error
+	 */
+	protected function process_manifest_entity( $reader ) {
+		switch ( $reader->name ) {
+			case 'item':
+				$node = $this->safe_expand( $reader, 'item' );
+				if ( false === $node ) {
+					return new WP_Error( 'wxr_importer.batch.bad_item', __( 'Malformed item node.', 'wordpress-importer' ) );
+				}
+
+				$parsed = $this->parse_post_node( $node );
+				if ( is_wp_error( $parsed ) ) {
+					$this->log_error( $parsed );
+					return $parsed;
+				}
+
+				$post_type = isset( $parsed['data']['post_type'] ) ? $parsed['data']['post_type'] : 'post';
+				$old_id    = isset( $parsed['data']['post_id'] ) ? (int) $parsed['data']['post_id'] : 0;
+				$title     = isset( $parsed['data']['post_title'] ) ? $parsed['data']['post_title'] : '';
+				$type      = 'attachment' === $post_type ? 'media' : 'posts';
+
+				if ( 'attachment' === $post_type && empty( $this->options['fetch_attachments'] ) ) {
+					return array(
+						'skipped' => true,
+						'type'    => $type,
+						'old_id'  => $old_id,
+						'title'   => $title,
+						'new_id'  => null,
+					);
+				}
+
+				$existing = $this->post_exists( $parsed['data'] );
+
+				$post_status = $this->process_post( $parsed['data'], $parsed['meta'], $parsed['comments'], $parsed['terms'] );
+
+				$new_id = isset( $this->mapping['post'][ $old_id ] ) ? (int) $this->mapping['post'][ $old_id ] : null;
+
+				if ( is_array( $post_status ) ) {
+					if ( ! empty( $post_status['post_id'] ) ) {
+						$new_id = (int) $post_status['post_id'];
+					}
+
+					if ( ! empty( $post_status['incomplete'] ) ) {
+						return array(
+							'incomplete' => true,
+							'type'       => $type,
+							'old_id'     => $old_id,
+							'title'      => $title,
+							'new_id'     => $new_id,
+						);
+					}
+				}
+
+				$completed_resumed_post = is_array( $post_status ) && empty( $post_status['incomplete'] );
+				if ( $existing && ! $completed_resumed_post ) {
+					return array(
+						'skipped' => true,
+						'type'    => $type,
+						'old_id'  => $old_id,
+						'title'   => $title,
+						'new_id'  => $new_id,
+					);
+				}
+
+				return array(
+					'type'   => $type,
+					'old_id' => $old_id,
+					'title'  => $title,
+					'new_id' => $new_id,
+				);
+
+			case 'wp:author':
+				$node = $reader->expand();
+				if ( false === $node ) {
+					return new WP_Error( 'wxr_importer.batch.bad_author', __( 'Malformed author node.', 'wordpress-importer' ) );
+				}
+
+				$parsed = $this->parse_author_node( $node );
+				if ( is_wp_error( $parsed ) ) {
+					$this->log_error( $parsed );
+					return $parsed;
+				}
+
+				$status = $this->process_author( $parsed['data'], $parsed['meta'] );
+
+				if ( is_wp_error( $status ) ) {
+					return $status;
+				}
+
+				$old_id = isset( $parsed['data']['ID'] ) ? (int) $parsed['data']['ID'] : 0;
+				$title  = isset( $parsed['data']['display_name'] ) ? $parsed['data']['display_name'] : '';
+				if ( empty( $title ) && isset( $parsed['data']['user_login'] ) ) {
+					$title = $parsed['data']['user_login'];
+				}
+				$new_id = isset( $this->mapping['user'][ $old_id ] ) ? (int) $this->mapping['user'][ $old_id ] : null;
+
+				return array(
+					'type'   => 'users',
+					'old_id' => $old_id,
+					'title'  => $title,
+					'new_id' => $new_id,
+				);
+
+			case 'wp:category':
+			case 'wp:tag':
+			case 'wp:term':
+				$kind = str_replace( 'wp:', '', $reader->name );
+				if ( 'category' === $kind ) {
+					$term_kind = 'category';
+				} elseif ( 'tag' === $kind ) {
+					$term_kind = 'tag';
+				} else {
+					$term_kind = 'term';
+				}
+
+				$node = $this->safe_expand( $reader, $kind );
+				if ( false === $node ) {
+					return new WP_Error( 'wxr_importer.batch.bad_term', __( 'Malformed term node.', 'wordpress-importer' ) );
+				}
+
+				$parsed = $this->parse_term_node( $node, 'wp:category' === $reader->name ? 'category' : ( 'wp:tag' === $reader->name ? 'tag' : null ) );
+				if ( is_wp_error( $parsed ) ) {
+					$this->log_error( $parsed );
+					return $parsed;
+				}
+
+				$this->process_term( $parsed['data'], $parsed['meta'] );
+
+				$old_id = isset( $parsed['data']['term_id'] ) ? (int) $parsed['data']['term_id'] : 0;
+				$title  = isset( $parsed['data']['name'] ) ? $parsed['data']['name'] : '';
+				$new_id = isset( $this->mapping['term_id'][ $old_id ] ) ? (int) $this->mapping['term_id'][ $old_id ] : null;
+
+				return array(
+					'type'   => 'terms',
+					'old_id' => $old_id,
+					'title'  => $title,
+					'new_id' => $new_id,
+				);
+		}
+
+		return array( 'skipped' => true );
+	}
+
+	/**
+	 * Public wrapper for import_end().
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return void
+	 */
+	public function import_end_public() {
+		$this->import_end();
+	}
+
+	/**
+	 * Posts requiring remapping.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return array<int, bool>
+	 */
+	public function get_requires_remapping_posts() {
+		return $this->requires_remapping['post'];
+	}
+
+	/**
+	 * Comments requiring remapping.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return array<int, bool>
+	 */
+	public function get_requires_remapping_comments() {
+		return $this->requires_remapping['comment'];
+	}
+
+	/**
+	 * Featured images map.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return array<int, int>
+	 */
+	public function get_featured_images() {
+		return $this->featured_images;
+	}
+
+	/**
+	 * Run post_process_posts for a batch (public for remapper).
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param array<int, bool> $todo Post IDs to process.
+	 *
+	 * @return void
+	 */
+	public function post_process_posts_public( array $todo ) {
+		$this->post_process_posts( $todo );
+	}
+
+	/**
+	 * Run post_process_comments for a batch (public for remapper).
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param array<int, bool> $todo Comment IDs to process.
+	 *
+	 * @return void
+	 */
+	public function post_process_comments_public( array $todo ) {
+		$this->post_process_comments( $todo );
+	}
+
+	/**
+	 * Run URL replacement (public for remapper).
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return void
+	 */
+	public function replace_attachment_urls_in_content_public() {
+		$this->replace_attachment_urls_in_content();
+	}
+
+	/**
+	 * Remap featured images for a batch of posts.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param array<int, int> $batch Featured image map subset.
+	 *
+	 * @return void
+	 */
+	public function remap_featured_images_batch( array $batch ) {
+		$saved = $this->featured_images;
+		$this->featured_images = $batch;
+		$this->remap_featured_images();
+		$this->featured_images = $saved;
 	}
 }

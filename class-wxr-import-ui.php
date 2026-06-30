@@ -182,7 +182,37 @@ class WXR_Import_UI {
 				$this->display_author_step();
 				break;
 			case 2:
-				$this->display_import_step();
+				if ( ! empty( $_POST['import_id'] ) ) {
+					$this->display_import_step();
+					break;
+				}
+				if ( ! empty( $_GET['job_id'] ) ) {
+					$this->display_job_progress_page();
+					break;
+				}
+				$active_job = ( new WXR_Import_Job_Repository() )->get_active_job_for_user( get_current_user_id() );
+				if ( $active_job ) {
+					wp_safe_redirect(
+						add_query_arg(
+							array(
+								'import' => 'wordpress',
+								'step'   => 3,
+								'job_id' => $active_job->id,
+							),
+							admin_url( 'admin.php' )
+						)
+					);
+					exit;
+				}
+				$this->display_error(
+					new WP_Error(
+						'wxr_importer.import.missing_id',
+						__( 'Missing import file ID from request. Start a new import or resume from the upload screen.', 'wordpress-importer' )
+					)
+				);
+				break;
+			case 3:
+				$this->display_job_progress_page();
 				break;
 		}
 	}
@@ -202,10 +232,108 @@ class WXR_Import_UI {
 	}
 
 	/**
-	 * Display introductory text and file upload form
+	 * Display introductory text and file upload form.
 	 */
 	protected function display_intro_step() {
+		$this->enqueue_admin_styles( 'intro' );
+		$this->enqueue_intro_scripts();
+
+		$repository = new WXR_Import_Job_Repository();
+		$resume_job = $repository->get_active_job_for_user( get_current_user_id() );
+		$last_job   = $repository->get_last_completed_for_user( get_current_user_id() );
+
 		require __DIR__ . '/templates/intro.php';
+	}
+
+	/**
+	 * Enqueue shared admin styles for importer screens.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param string $screen Screen slug: intro, settings, progress.
+	 *
+	 * @return void
+	 */
+	protected function enqueue_admin_styles( $screen = 'intro' ) {
+		$intro_css = dirname( __FILE__ ) . '/assets/intro.css';
+		wp_enqueue_style(
+			'wxr-importer-admin',
+			WXR_IMPORTER_URL . 'assets/intro.css',
+			array(),
+			file_exists( $intro_css ) ? filemtime( $intro_css ) : WXR_IMPORTER_VERSION
+		);
+
+		if ( in_array( $screen, array( 'settings', 'progress' ), true ) ) {
+			$import_css = dirname( __FILE__ ) . '/assets/import.css';
+			wp_enqueue_style(
+				'wxr-importer-progress',
+				WXR_IMPORTER_URL . 'assets/import.css',
+				array( 'wxr-importer-admin' ),
+				file_exists( $import_css ) ? filemtime( $import_css ) : WXR_IMPORTER_VERSION
+			);
+		}
+	}
+
+	/**
+	 * Enqueue intro page scripts (tabs + uploader).
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return void
+	 */
+	protected function enqueue_intro_scripts() {
+		$tabs_js = dirname( __FILE__ ) . '/assets/intro-tabs.js';
+		wp_enqueue_script(
+			'wxr-importer-intro-tabs',
+			WXR_IMPORTER_URL . 'assets/intro-tabs.js',
+			array( 'jquery' ),
+			file_exists( $tabs_js ) ? filemtime( $tabs_js ) : WXR_IMPORTER_VERSION,
+			true
+		);
+	}
+
+	/**
+	 * Default web UI batch size.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return int
+	 */
+	protected function get_web_batch_size( $entity_total = 0 ) {
+		/**
+		 * Filter the batch size for web UI imports.
+		 *
+		 * @since 3.0.0
+		 *
+		 * @param int $batch_size Items per AJAX batch. Default 100.
+		 * @param int $entity_total Total entities in the export, if known.
+		 */
+		$batch_size = max( 1, (int) apply_filters( 'wxr_importer.web_batch_size', 100, $entity_total ) );
+
+		return $batch_size;
+	}
+
+	/**
+	 * Get options for the importer.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return array<string, mixed> Options to pass to WXR_Importer::__construct.
+	 */
+	protected function get_import_options() {
+		$options = array(
+			'fetch_attachments' => $this->fetch_attachments,
+			'default_author'    => get_current_user_id(),
+		);
+
+		/**
+		 * Filter the importer options used in the admin UI.
+		 *
+		 * @since 3.0.0
+		 *
+		 * @param array<string, mixed> $options Options to pass to WXR_Importer::__construct.
+		 */
+		return apply_filters( 'wxr_importer.admin.import_options', $options );
 	}
 
 	protected function render_upload_form() {
@@ -291,10 +419,10 @@ class WXR_Import_UI {
 			)
 		);
 
-		// Use WXR_IMPORTER_URL constant for consistent asset loading
-		wp_enqueue_style( 'wxr-import-upload', WXR_IMPORTER_URL . 'assets/intro.css', array(), '2.0.1' );
+		// Use WXR_IMPORTER_URL constant for consistent asset loading.
+		$this->enqueue_admin_styles( 'intro' );
 
-		// Load the template
+		// Load the template.
 		remove_action( 'post-plupload-upload-ui', 'media_upload_flash_bypass' );
 		require __DIR__ . '/templates/upload.php';
 		add_action( 'post-plupload-upload-ui', 'media_upload_flash_bypass' );
@@ -326,6 +454,8 @@ class WXR_Import_UI {
 			$this->display_error( $data );
 			return;
 		}
+
+		$this->enqueue_admin_styles( 'settings' );
 
 		require __DIR__ . '/templates/select-options.php';
 	}
@@ -750,6 +880,14 @@ class WXR_Import_UI {
 			@file_put_contents( trailingslashit( $chunk_base ) . '.htaccess', "Deny from all\n" );
 		}
 
+		if ( ! file_exists( trailingslashit( $chunk_base ) . 'web.config' ) ) {
+			@file_put_contents(
+				trailingslashit( $chunk_base ) . 'web.config',
+				'<?xml version="1.0" encoding="UTF-8"?>' . "\n"
+				. '<configuration><system.webServer><authorization><deny users="*" /></authorization></system.webServer></configuration>'
+			);
+		}
+
 		$chunk_dir = trailingslashit( $chunk_base ) . $upload_session;
 		if ( ! wp_mkdir_p( $chunk_dir ) ) {
 			$this->log_upload_debug( 'chunk_dir_failed', array( 'chunk_dir' => $chunk_dir ) );
@@ -995,17 +1133,19 @@ class WXR_Import_UI {
 	 * @param array  $context Debug context.
 	 */
 	protected function log_upload_debug( $event, array $context = array() ) {
-		$entry = array(
-			'time'    => gmdate( 'c' ),
-			'event'   => $event,
-			'context' => $context,
+		if ( ! ( defined( 'WP_DEBUG' ) && WP_DEBUG && defined( 'WXR_IMPORTER_DIAGNOSTICS' ) && WXR_IMPORTER_DIAGNOSTICS ) ) {
+			return;
+		}
+
+		$entry = sprintf(
+			'[wxr-importer] %s %s',
+			$event,
+			wp_json_encode( $context, JSON_UNESCAPED_SLASHES )
 		);
 
-		@file_put_contents(
-			__DIR__ . '/wxr-upload-debug.log',
-			wp_json_encode( $entry, JSON_UNESCAPED_SLASHES ) . PHP_EOL,
-			FILE_APPEND | LOCK_EX
-		);
+		if ( defined( 'WP_DEBUG_LOG' ) && WP_DEBUG_LOG ) {
+			error_log( $entry );
+		}
 	}
 
 	/**
@@ -1190,277 +1330,151 @@ class WXR_Import_UI {
 	protected function display_import_step() {
 		$args = wp_unslash( $_POST );
 		if ( ! isset( $args['import_id'] ) ) {
-			// Missing import ID.
 			$error = new WP_Error( 'wxr_importer.import.missing_id', __( 'Missing import file ID from request.', 'wordpress-importer' ) );
 			$this->display_error( $error );
 			return;
 		}
 
-		// Check the nonce.
 		check_admin_referer( sprintf( 'wxr.import:%d', (int) $args['import_id'] ) );
 
-		$this->id = (int) $args['import_id'];
-		$file = get_attached_file( $this->id );
-
-		$mapping = $this->get_author_mapping( $args );
+		$this->id   = (int) $args['import_id'];
+		$file       = get_attached_file( $this->id );
+		$mapping    = $this->get_author_mapping( $args );
 		$fetch_attachments = ( ! empty( $args['fetch_attachments'] ) && $this->allow_fetch_attachments() );
 
-		// Set our settings
-		$settings = array(
-			'mapping'       => $mapping,
+		$job_options = array(
+			'mapping'           => $mapping,
 			'fetch_attachments' => $fetch_attachments,
-			'is_local_file' => (bool) get_post_meta( $this->id, '_wxr_is_local_file', true ),
+			'is_local_file'     => (bool) get_post_meta( $this->id, '_wxr_is_local_file', true ),
+			'batch_size'        => $this->get_web_batch_size( 0 ),
 		);
-		update_post_meta( $this->id, '_wxr_import_settings', $settings );
 
-		// Time to run the import!
-		set_time_limit( 0 );
+		$job = WXR_Import_Job::create( $this->id, $file, $job_options );
+		if ( is_wp_error( $job ) ) {
+			$this->display_error( $job );
+			return;
+		}
 
-		// Ensure we're not buffered.
-		wp_ob_end_flush_all();
-		flush();
+		$job->options['batch_size'] = $this->get_web_batch_size( $job->manifest_entity_total() );
 
-		$data = get_post_meta( $this->id, '_wxr_import_info', true );
-		require __DIR__ . '/templates/import.php';
+		$job->set_status( 'processing' );
+		$repository = new WXR_Import_Job_Repository();
+		$repository->save( $job );
+
+		update_post_meta( $this->id, '_wxr_import_job_id', $job->id );
+
+		wp_safe_redirect(
+			add_query_arg(
+				array(
+					'import' => 'wordpress',
+					'step'   => 3,
+					'job_id' => $job->id,
+				),
+				admin_url( 'admin.php' )
+			)
+		);
+		exit;
 	}
 
 	/**
-	 * Run an import, and send an event-stream response.
+	 * Display job progress page (resume or view report).
 	 *
-	 * Streams logs and success messages to the browser to allow live status
-	 * and updates.
+	 * @since 3.0.0
+	 *
+	 * @return void
+	 */
+	protected function display_job_progress_page() {
+		$job_id = isset( $_GET['job_id'] ) ? absint( $_GET['job_id'] ) : 0;
+		if ( $job_id < 1 ) {
+			$active_job = ( new WXR_Import_Job_Repository() )->get_active_job_for_user( get_current_user_id() );
+			if ( $active_job ) {
+				$job_id = $active_job->id;
+			}
+		}
+		if ( $job_id < 1 ) {
+			$this->display_error( new WP_Error( 'wxr_importer.job.missing_id', __( 'Missing import job ID.', 'wordpress-importer' ) ) );
+			return;
+		}
+
+		$job = WXR_Import_Job::get( $job_id );
+		if ( is_wp_error( $job ) ) {
+			$this->display_error( $job );
+			return;
+		}
+
+		if ( $job->user_id && (int) $job->user_id !== get_current_user_id() && ! current_user_can( 'manage_options' ) ) {
+			wp_die(
+				esc_html__( 'You do not have permission to view this import job.', 'wordpress-importer' ),
+				esc_html__( 'Permission Denied', 'wordpress-importer' ),
+				array( 'response' => 403 )
+			);
+		}
+
+		$this->id = (int) $job->attachment_id;
+		$data     = get_post_meta( $this->id, '_wxr_import_info', true );
+
+		if ( ! $data instanceof WXR_Import_Info ) {
+			$data = new WXR_Import_Info();
+			$data->post_count    = $job->total_posts;
+			$data->media_count   = $job->total_media;
+			$data->comment_count = $job->total_comments;
+			$data->term_count    = $job->total_terms;
+			$data->users         = array_fill( 0, $job->total_users, array() );
+			if ( ! empty( $job->preflight_data['title'] ) ) {
+				$data->title = $job->preflight_data['title'];
+			}
+		}
+
+		$this->enqueue_admin_styles( 'progress' );
+		$job_id = $job->id;
+		require __DIR__ . '/templates/job-progress.php';
+	}
+
+	/**
+	 * Deprecated SSE import endpoint.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return void
 	 */
 	public function stream_import() {
-		$stream_complete_emitted = false;
-		$stream_import_started   = false;
-
-		$this->log_upload_debug(
-			'stream_entry',
-			array(
-				'method'       => isset( $_SERVER['REQUEST_METHOD'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) : '',
-				'action'       => isset( $_REQUEST['action'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['action'] ) ) : '',
-				'id'           => isset( $_REQUEST['id'] ) ? (int) $_REQUEST['id'] : 0,
-				'user_id'      => get_current_user_id(),
-				'can_import'   => current_user_can( 'import' ),
-				'request_keys' => array_keys( $_REQUEST ),
-			)
-		);
-
-		register_shutdown_function(
-			function () use ( &$stream_complete_emitted, &$stream_import_started ) {
-				$this->log_upload_debug(
-					'stream_shutdown',
-					array(
-						'id'                 => $this->id,
-						'import_started'     => $stream_import_started,
-						'complete_emitted'   => $stream_complete_emitted,
-						'connection_status'  => connection_status(),
-						'connection_aborted' => connection_aborted(),
-						'last_error'         => error_get_last(),
-					)
-				);
-			}
-		);
-
-		// Turn off PHP output compression
-		$previous = error_reporting( error_reporting() ^ E_WARNING );
-		ini_set( 'output_buffering', 'off' );
-		ini_set( 'zlib.output_compression', false );
-		error_reporting( $previous );
-
-		// Prevent caching for SSE
-		nocache_headers();
-		header( 'Cache-Control: no-cache' );
-		header( 'X-Accel-Buffering: no' );
-		
-		if ( isset( $GLOBALS['is_nginx'] ) && $GLOBALS['is_nginx'] ) {
-			// Setting this header instructs Nginx to disable fastcgi_buffering
-			// and disable gzip for this request.
-			header( 'Content-Encoding: none' );
-		}
-
-		// Start the event stream.
-		header( 'Content-Type: text/event-stream; charset=utf-8' );
-
-		$this->id = (int) wp_unslash( $_REQUEST['id'] );
-		$settings = get_post_meta( $this->id, '_wxr_import_settings', true );
-		if ( empty( $settings ) ) {
-			$this->log_upload_debug(
-				'stream_missing_settings',
-				array(
-					'id' => $this->id,
-				)
-			);
-			// Tell the browser to stop reconnecting.
-			status_header( 204 );
-			exit;
-		}
-
-		// Verify the user has permission to run this import
 		if ( ! current_user_can( 'import' ) ) {
-			$this->log_upload_debug( 'stream_permission_failed', array( 'id' => $this->id ) );
-			$this->emit_sse_message( array(
-				'action' => 'error',
-				'error'  => __( 'You do not have permission to import content.', 'wordpress-importer' ),
-			) );
-			exit;
-		}
-
-		// 2KB padding for IE
-		echo ':' . str_repeat( ' ', 2048 ) . "\n\n";
-
-		// Time to run the import!
-		set_time_limit( 0 );
-
-		// Ensure we're not buffered.
-		wp_ob_end_flush_all();
-		flush();
-
-		// Send initial connection message to confirm stream is working
-		$this->emit_sse_message( array(
-			'action' => 'connected',
-			'message' => __( 'Import stream connected. Starting import...', 'wordpress-importer' ),
-		) );
-
-		$mapping = $settings['mapping'];
-		$this->fetch_attachments = (bool) $settings['fetch_attachments'];
-		$this->is_local_file     = ! empty( $settings['is_local_file'] );
-
-		$this->log_upload_debug(
-			'stream_settings_loaded',
-			array(
-				'id'                => $this->id,
-				'fetch_attachments' => $this->fetch_attachments,
-				'is_local_file'     => $this->is_local_file,
-				'mapping_count'     => isset( $mapping['mapping'] ) ? count( $mapping['mapping'] ) : 0,
-				'slug_overrides'    => isset( $mapping['slug_overrides'] ) ? count( $mapping['slug_overrides'] ) : 0,
-			)
-		);
-
-		$importer = $this->get_importer();
-		if ( ! empty( $mapping['mapping'] ) ) {
-			$importer->set_user_mapping( $mapping['mapping'] );
-		}
-		if ( ! empty( $mapping['slug_overrides'] ) ) {
-			$importer->set_user_slug_overrides( $mapping['slug_overrides'] );
-		}
-
-		// Are we allowed to create users?
-		if ( ! $this->allow_create_users() ) {
-			add_filter( 'wxr_importer.pre_process.user', '__return_null' );
-		}
-
-		// Keep track of our progress
-		add_action( 'wxr_importer.processed.post', array( $this, 'imported_post' ), 10, 2 );
-		add_action( 'wxr_importer.process_failed.post', array( $this, 'imported_post' ), 10, 2 );
-		add_action( 'wxr_importer.process_already_imported.post', array( $this, 'already_imported_post' ), 10, 2 );
-		add_action( 'wxr_importer.process_skipped.post', array( $this, 'already_imported_post' ), 10, 2 );
-		add_action( 'wxr_importer.processed.comment', array( $this, 'imported_comment' ) );
-		add_action( 'wxr_importer.process_already_imported.comment', array( $this, 'imported_comment' ) );
-		add_action( 'wxr_importer.processed.term', array( $this, 'imported_term' ) );
-		add_action( 'wxr_importer.process_failed.term', array( $this, 'imported_term' ) );
-		add_action( 'wxr_importer.process_already_imported.term', array( $this, 'imported_term' ) );
-		add_action( 'wxr_importer.processed.user', array( $this, 'imported_user' ) );
-		add_action( 'wxr_importer.process_failed.user', array( $this, 'imported_user' ) );
-
-		// Clean up some memory
-		unset( $settings );
-
-		// Flush once more.
-		flush();
-
-		$file = get_attached_file( $this->id );
-
-		// Handle WordPress renaming .xml to .xml.txt during upload
-		if ( ( ! $file || ! file_exists( $file ) ) && $file ) {
-			$candidate = preg_replace( '/\.txt$/i', '', $file );
-			if ( $candidate !== $file && file_exists( $candidate ) ) {
-				update_attached_file( $this->id, $candidate );
-				$file = $candidate;
-			}
-		}
-
-		if ( ! $file || ! file_exists( $file ) ) {
-			$this->log_upload_debug(
-				'stream_file_missing',
-				array(
-					'id'   => $this->id,
-					'file' => $file,
-				)
+			status_header( 403 );
+			wp_send_json_error(
+				array( 'message' => __( 'You do not have permission to import content.', 'wordpress-importer' ) ),
+				403
 			);
-			$this->emit_sse_message( array(
-				'action' => 'error',
-				'error' => __( 'Import file not found.', 'wordpress-importer' ),
-			) );
-			exit;
 		}
 
-		// Send start message
-		$this->emit_sse_message( array(
-			'action' => 'start',
-			'message' => __( 'Beginning import...', 'wordpress-importer' ),
-		) );
+		$attachment_id = isset( $_REQUEST['id'] ) ? absint( $_REQUEST['id'] ) : 0;
+		$job_id        = $attachment_id ? (int) get_post_meta( $attachment_id, '_wxr_import_job_id', true ) : 0;
 
-		$this->log_upload_debug(
-			'stream_import_start',
-			array(
-				'id'        => $this->id,
-				'file'      => $file,
-				'file_size' => filesize( $file ),
-			)
-		);
-		$stream_import_started = true;
-		$err = $importer->import( $file );
-		$this->log_upload_debug(
-			'stream_import_returned',
-			array(
-				'id'       => $this->id,
-				'is_error' => is_wp_error( $err ),
-				'code'     => is_wp_error( $err ) ? $err->get_error_code() : null,
-				'message'  => is_wp_error( $err ) ? $err->get_error_message() : null,
-			)
-		);
+		if ( $job_id > 0 ) {
+			$resume_url = add_query_arg(
+				array(
+					'import' => 'wordpress',
+					'step'   => 3,
+					'job_id' => $job_id,
+				),
+				admin_url( 'admin.php' )
+			);
 
-		// Remove the settings to stop future reconnects.
-		delete_post_meta( $this->id, '_wxr_import_settings' );
-		$this->log_upload_debug( 'stream_settings_deleted', array( 'id' => $this->id ) );
-
-		// Clean up the import file and its attachment record.
-		// — Browser-uploaded files: always delete (they're temporary, and leaving a
-		//   WXR file publicly accessible in uploads is a security risk).
-		// — Local-path files (is_local_file = true): leave the file on disk but still
-		//   remove the temporary attachment record we created.
-		if ( ! $this->is_local_file ) {
-			// Delete the physical file
-			$upload_file = get_attached_file( $this->id );
-			if ( $upload_file && file_exists( $upload_file ) ) {
-				wp_delete_attachment( $this->id, true ); // true = delete file from disk too
-			}
-		} else {
-			// Just remove the temporary attachment record, leave the file intact
-			wp_delete_post( $this->id, true );
-		}
-		$this->log_upload_debug(
-			'stream_cleanup_done',
-			array(
-				'id'            => $this->id,
-				'is_local_file' => $this->is_local_file,
-			)
-		);
-
-		// Let the browser know we're done.
-		$complete = array(
-			'action' => 'complete',
-			'error'  => false,
-		);
-		if ( is_wp_error( $err ) ) {
-			$complete['error'] = $err->get_error_message();
+			wp_send_json_error(
+				array(
+					'message'    => __( 'The legacy import stream has been retired. Use the job-based import UI instead.', 'wordpress-importer' ),
+					'resume_url' => $resume_url,
+					'job_id'     => $job_id,
+				),
+				410
+			);
 		}
 
-		$this->log_upload_debug( 'stream_complete_emit', array( 'id' => $this->id, 'complete' => $complete ) );
-		$this->emit_sse_message( $complete );
-		$stream_complete_emitted = true;
-		exit;
+		wp_send_json_error(
+			array(
+				'message' => __( 'The legacy import stream has been retired. Please start a new import from Tools → Import.', 'wordpress-importer' ),
+			),
+			410
+		);
 	}
 
 	/**
@@ -1481,43 +1495,21 @@ class WXR_Import_UI {
 			wp_send_json_error( array( 'message' => __( 'Invalid import ID.', 'wordpress-importer' ) ) );
 		}
 
-		// Remove the settings — this stops the SSE endpoint from processing
-		// if the browser reconnects, and marks the import as no longer active.
+		// Cancel any associated import job.
+		$job_id = (int) get_post_meta( $id, '_wxr_import_job_id', true );
+		if ( $job_id > 0 ) {
+			$job = WXR_Import_Job::get( $job_id );
+			if ( ! is_wp_error( $job ) && ! $job->is_terminal() ) {
+				$job->set_status( 'cancelled' );
+				$job->add_log( 'info', __( 'Import cancelled by user.', 'wordpress-importer' ) );
+				$repository = new WXR_Import_Job_Repository();
+				$repository->save( $job );
+			}
+		}
+
 		delete_post_meta( $id, '_wxr_import_settings' );
 
 		wp_send_json_success( array( 'message' => __( 'Import cancelled.', 'wordpress-importer' ) ) );
-	}
-
-	/**
-	 * Get the importer instance.
-	 *
-	 * @return WXR_Importer
-	 */
-	protected function get_importer() {
-		$importer = new WXR_Importer( $this->get_import_options() );
-		$logger = new WP_Importer_Logger_ServerSentEvents();
-		$importer->set_logger( $logger );
-
-		return $importer;
-	}
-
-	/**
-	 * Get options for the importer.
-	 *
-	 * @return array Options to pass to WXR_Importer::__construct
-	 */
-	protected function get_import_options() {
-		$options = array(
-			'fetch_attachments' => $this->fetch_attachments,
-			'default_author'    => get_current_user_id(),
-		);
-
-		/**
-		 * Filter the importer options used in the admin UI.
-		 *
-		 * @param array $options Options to pass to WXR_Importer::__construct
-		 */
-		return apply_filters( 'wxr_importer.admin.import_options', $options );
 	}
 
 	/**
@@ -1660,80 +1652,187 @@ class WXR_Import_UI {
 	}
 
 	/**
-	 * Emit a Server-Sent Events message.
+	 * Process one import batch via AJAX.
 	 *
-	 * @param mixed $data Data to be JSON-encoded and sent in the message.
+	 * @since 3.0.0
+	 *
+	 * @return void
 	 */
-	protected function emit_sse_message( $data ) {
-		echo "event: message\n";
-		echo 'data: ' . wp_json_encode( $data ) . "\n\n";
-
-		// Extra padding.
-		echo ':' . str_repeat( ' ', 2048 ) . "\n\n";
-
-		if ( function_exists( 'ob_flush' ) ) {
-			@ob_flush();
+	public function handle_import_batch() {
+		if ( ! current_user_can( 'import' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'wordpress-importer' ) ), 403 );
 		}
-		flush();
+
+		$job_id = isset( $_POST['job_id'] ) ? absint( $_POST['job_id'] ) : 0;
+		check_ajax_referer( 'wxr-import-job:' . $job_id, 'nonce' );
+
+		set_time_limit( 0 );
+		wp_raise_memory_limit( 'admin' );
+
+		try {
+			$processor = new WXR_Import_Processor();
+			$result    = $processor->process_job( $job_id );
+
+			if ( is_wp_error( $result ) ) {
+				wp_send_json_error( array( 'message' => $result->get_error_message() ) );
+			}
+
+			if ( isset( $result['item_results'] ) ) {
+				unset( $result['item_results'] );
+			}
+
+			wp_send_json_success( $result );
+		} catch ( Throwable $e ) {
+			$job = WXR_Import_Job::get( $job_id );
+			if ( ! is_wp_error( $job ) ) {
+				$job->add_log( 'error', $e->getMessage() );
+				( new WXR_Import_Job_Repository() )->save( $job );
+			}
+			wp_send_json_error(
+				array(
+					'message' => sprintf(
+						/* translators: %s: error message */
+						__( 'Batch failed: %s', 'wordpress-importer' ),
+						$e->getMessage()
+					),
+				),
+				500
+			);
+		}
 	}
 
 	/**
-	 * Send message when a post has been imported.
+	 * Return persisted job status for polling UI.
 	 *
-	 * @param int $id Post ID.
-	 * @param array $data Post data saved to the DB.
-	 */
-	public function imported_post( $id, $data ) {
-		$this->emit_sse_message( array(
-			'action' => 'updateDelta',
-			'type'   => ( $data['post_type'] === 'attachment' ) ? 'media' : 'posts',
-			'delta'  => 1,
-		));
-	}
-
-	/**
-	 * Send message when a post is marked as already imported.
+	 * @since 3.0.0
 	 *
-	 * @param array $data Post data saved to the DB.
+	 * @return void
 	 */
-	public function already_imported_post( $data ) {
-		$this->emit_sse_message( array(
-			'action' => 'updateDelta',
-			'type'   => ( $data['post_type'] === 'attachment' ) ? 'media' : 'posts',
-			'delta'  => 1,
-		));
+	public function handle_import_status() {
+		if ( ! current_user_can( 'import' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'wordpress-importer' ) ), 403 );
+		}
+
+		$job_id = isset( $_GET['job_id'] ) ? absint( $_GET['job_id'] ) : 0;
+		check_ajax_referer( 'wxr-import-job:' . $job_id, 'nonce' );
+
+		$job = WXR_Import_Job::get( $job_id );
+		if ( is_wp_error( $job ) ) {
+			wp_send_json_error( array( 'message' => $job->get_error_message() ) );
+		}
+
+		wp_send_json_success( $job->to_status_array() );
 	}
 
 	/**
-	 * Send message when a comment has been imported.
+	 * Pause a running import job.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return void
 	 */
-	public function imported_comment() {
-		$this->emit_sse_message( array(
-			'action' => 'updateDelta',
-			'type'   => 'comments',
-			'delta'  => 1,
-		));
+	public function handle_import_pause() {
+		if ( ! current_user_can( 'import' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'wordpress-importer' ) ), 403 );
+		}
+
+		$job_id = isset( $_POST['job_id'] ) ? absint( $_POST['job_id'] ) : 0;
+		check_ajax_referer( 'wxr-import-job:' . $job_id, 'nonce' );
+
+		$job = WXR_Import_Job::get( $job_id );
+		if ( is_wp_error( $job ) ) {
+			wp_send_json_error( array( 'message' => $job->get_error_message() ) );
+		}
+
+		$job->options['pause_requested'] = true;
+		$job->set_status( 'paused' );
+		$job->add_log( 'info', __( 'Import paused.', 'wordpress-importer' ) );
+		$repository = new WXR_Import_Job_Repository();
+		$repository->save( $job );
+
+		wp_send_json_success( $job->to_status_array() );
 	}
 
 	/**
-	 * Send message when a term has been imported.
+	 * Resume a paused import job.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return void
 	 */
-	public function imported_term() {
-		$this->emit_sse_message( array(
-			'action' => 'updateDelta',
-			'type'   => 'terms',
-			'delta'  => 1,
-		));
+	public function handle_import_resume() {
+		if ( ! current_user_can( 'import' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'wordpress-importer' ) ), 403 );
+		}
+
+		$job_id = isset( $_POST['job_id'] ) ? absint( $_POST['job_id'] ) : 0;
+		check_ajax_referer( 'wxr-import-job:' . $job_id, 'nonce' );
+
+		$job = WXR_Import_Job::get( $job_id );
+		if ( is_wp_error( $job ) ) {
+			wp_send_json_error( array( 'message' => $job->get_error_message() ) );
+		}
+
+		unset( $job->options['pause_requested'] );
+		$job->set_status( 'processing' );
+		$job->add_log( 'info', __( 'Import resumed.', 'wordpress-importer' ) );
+		$repository = new WXR_Import_Job_Repository();
+		$repository->save( $job );
+
+		wp_send_json_success( $job->to_status_array() );
 	}
 
 	/**
-	 * Send message when a user has been imported.
+	 * Remove abandoned chunk upload directories older than one day.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @return void
 	 */
-	public function imported_user() {
-		$this->emit_sse_message( array(
-			'action' => 'updateDelta',
-			'type'   => 'users',
-			'delta'  => 1,
-		));
+	public static function cleanup_abandoned_chunks() {
+		$upload_dir = wp_upload_dir();
+		if ( ! empty( $upload_dir['error'] ) ) {
+			return;
+		}
+
+		$chunk_base = trailingslashit( $upload_dir['basedir'] ) . 'wxr-importer-chunks';
+		if ( ! is_dir( $chunk_base ) ) {
+			return;
+		}
+
+		$cutoff = time() - DAY_IN_SECONDS;
+		$dirs   = glob( trailingslashit( $chunk_base ) . '*', GLOB_ONLYDIR );
+		if ( ! is_array( $dirs ) ) {
+			return;
+		}
+
+		foreach ( $dirs as $dir ) {
+			if ( filemtime( $dir ) < $cutoff ) {
+				self::delete_directory( $dir );
+			}
+		}
+	}
+
+	/**
+	 * Recursively delete a directory.
+	 *
+	 * @since 3.0.0
+	 *
+	 * @param string $dir Directory path.
+	 *
+	 * @return void
+	 */
+	protected static function delete_directory( $dir ) {
+		$items = glob( trailingslashit( $dir ) . '*' );
+		if ( is_array( $items ) ) {
+			foreach ( $items as $item ) {
+				if ( is_dir( $item ) ) {
+					self::delete_directory( $item );
+				} else {
+					wp_delete_file( $item );
+				}
+			}
+		}
+		rmdir( $dir );
 	}
 }

@@ -5,6 +5,227 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.8] - 29/06/2026
+
+### Fixed
+- Large import batches no longer loop at entity 1/50 after the first successful work. Job saves now keep cursor and counters monotonic, reload fresh state after acquiring the batch lock, and repair progress from persisted item records when a stale request tries to save older progress.
+- Batch XML scanning no longer advances the `XMLReader` inside each processed entity, which was causing sibling importable nodes to be skipped and could produce a non-advancing `next_item_index`.
+- Processor now logs and repairs a batch cursor if a processed batch ever reports no forward movement.
+- Progress copy now distinguishes the XML scan cursor from actual imported content totals, avoiding misleading "entities processed" / "batch complete" messages.
+- Batch start logs are now persisted before heavy XML work begins, and the progress UI shows a running elapsed timer while an AJAX batch is still in flight.
+- Attachment entities are now skipped immediately when media fetching is disabled, avoiding unnecessary duplicate checks/post-processing and preventing skipped media from being counted as imported media.
+- Progress cards now show skipped and failed counts per content type, so disabled media imports clearly show skipped media instead of only showing imported media.
+- Pause/resume now syncs correctly with server status, survives page refreshes, and preserves pause requests made while a batch is still running.
+- Repeated timeout loops now back off the active batch size, escape single-entity dead loops, and record timed-out posts with their local post ID when WordPress created the post before Apache/FastCGI killed the request.
+- Import batches now set the standard `WP_IMPORTING` flag before inserting content so compatible plugins can skip expensive save-time processing during WXR imports.
+- Large posts now import post meta in resumable chunks with per-post checkpoints, keeping the XML cursor on the same entity until that post is actually complete instead of timing out, retrying, or falsely marking the whole post as finished.
+
+### Changed
+- Web imports now use 100 entities per batch by default for large WXR files instead of automatically throttling files over 5,000 entities down to 10.
+
+---
+
+## [3.0.7] - 29/06/2026
+
+### Fixed
+- Import stuck after first batch: batch/pause/resume AJAX used the wrong nonce field (`_ajax_nonce` vs `nonce`), so every batch after cron’s first pass failed with `-1` and the UI showed “Connection lost”.
+- Early progress showed **0%** when only a few entities were processed (e.g. 50 of 11,673); now shows at least 1% once work has started.
+- Progress UI runs batches sequentially (no overlapping interval timers), surfaces real AJAX error messages, auto-opens the log, and uses proper ellipsis in phase labels.
+- Large imports (>5k entities) cap batch size at 10 on existing jobs, not only new ones; mapping `exists` caches are no longer persisted (smaller job rows).
+- Batch handler raises time/memory limits and catches fatals with a logged error response.
+
+---
+
+## [3.0.6] - 29/06/2026
+
+### Fixed
+- Large imports stuck at 95% remapping after only ~50 entities: manifest JSON no longer round-trips reliably on big WXR files, so completion now uses persisted `manifest_entity_total` instead of `count( item_manifest )`.
+- Jobs that entered remapping too early are auto-recovered back to `processing` on the next batch.
+- Refreshing the import page no longer shows "Missing import file ID" — step 2 redirects to `step=3&job_id=N`, and GET requests resume the active job.
+- Progress page shows remapping/download log lines and surfaces AJAX batch errors.
+
+---
+
+## [3.0.5] - 29/06/2026
+
+### Fixed
+- Fatal error after upload: restored missing `get_import_options()` used during WXR preflight scan (settings step).
+
+---
+
+## [3.0.4] - 29/06/2026
+
+### Fixed
+- Upload progress percentage was hidden inside the 8px progress bar; percent now displays above the bar with correct percentage-based fill width.
+
+---
+
+## [3.0.3] - 29/06/2026
+
+### Added
+- `class-wxr-import-item.php` — per-entity tracking in `wp_wxr_import_items` (imported/skipped/failed per batch).
+- Deferred attachment download phase: attachments queued during content import, downloaded 3 at a time **before** remapping (`downloading_attachments` status).
+- `wxr_importer_cleanup_import_meta()` — removes all `_wxr_import_*` post/comment meta on completion and uninstall.
+- `bin/test-import.sh` — Phase 0 test harness (DB restore, WP-CLI import, JSON results).
+
+### Changed
+- Job processor records `item_results` from each batch into the items table.
+- WP-Cron and active-job queries include `downloading_attachments` status.
+- Progress UI shows "Downloading attachments…" phase label.
+- `uninstall.php` drops tables, clears meta, removes chunk dirs, unschedules cron hooks.
+
+### Removed
+- `assets/import.js`, `templates/import.php`, `class-logger-serversentevents.php` (legacy SSE path).
+- Deprecated unused `WXR_Importer` properties (`processed_posts`, `processed_terms`, `processed_menu_items`, `menu_item_orphans`).
+
+---
+
+## [3.0.2] - 29/06/2026
+
+### Added
+- Tabbed upload UI on step 0 (Upload file | Media library | Server path) instead of stacked options.
+- Step breadcrumb navigation across upload, settings, and import screens.
+- Per-type progress bars on the import page (`12 / 45` with fill bar).
+- Entity counter on progress page (`3,241 of 4,597 entities processed`).
+- `wxr_importer.web_batch_size` filter (default **50** for web UI).
+
+### Changed
+- Web UI default batch size increased from 10 to **50** items per AJAX request.
+- Settings step (author mapping) now loads shared importer CSS.
+- Progress page status banner and cards use consistent styling (no broken WP notice classes).
+- Resume/last-import banners use styled banners instead of raw admin notices.
+
+### Fixed
+- Author mapping step missing styles (cards, grid, author list).
+- Media library picker submits via dedicated tab form.
+- Progress page CSS/JS conflicts from mixed `notice` and custom classes.
+
+---
+
+## [3.0.1] - 29/06/2026
+
+### Added
+- **Import resume flow** — step 3 (`?step=3&job_id=N`) reopens progress for in-progress or completed jobs.
+- **Final import report** on the progress page when a job completes (imported/skipped/failed breakdown).
+- Intro page banners: resume in-progress imports, view last completed report.
+- `WXR_Import_Job::get_final_report()` and repository helpers `get_active_job_for_user()` / `get_last_completed_for_user()`.
+- Legacy session cleanup on upgrade (`_wxr_import_settings` meta removed).
+- One-time admin notice after upgrade explaining job-based architecture.
+
+### Changed
+- **Retired SSE import stream** — `stream_import()` now returns HTTP 410 with job resume URL when available.
+- Removed SSE helper methods (`emit_sse_message`, `imported_post`, etc.) from active UI path.
+- Author slug overrides now correctly restored from job options during batch processing.
+
+### Fixed
+- Author mapping structure (`mapping` + `slug_overrides`) now passed correctly to the batch processor.
+
+---
+
+## [3.0.0] - 29/06/2026
+
+### Added
+- **Resumable import job architecture** with custom tables `wp_wxr_import_jobs` and `wp_wxr_import_items`.
+- `WXR_Import_Job` model with persisted progress, mapping state, and job-scoped logging.
+- `WXR_Import_Job_Repository` for database access.
+- `WXR_Import_Processor` batch engine with per-job locking and WP-Cron fallback (`wxr_importer_process_batch`).
+- `WXR_Import_Remapper` for batched post-processing (parents, authors, URLs, featured images).
+- `WXR_Importer::import_batch()` and `build_import_manifest()` for slice-based WXR processing.
+- `WXR_Importer::get_mapping_state()` / `set_mapping_state()` for cross-request remapping persistence.
+- Job-based admin UI (`templates/job-progress.php`, `assets/job-status.js`) with polling instead of SSE.
+- AJAX endpoints: `wxr-import-batch`, `wxr-import-status`, `wxr-import-pause`, `wxr-import-resume`.
+- WP-CLI enhancements: `--batch-size`, `--no-attachments`, `--dry-run`, plus `status`, `cancel`, `list`, `report`, `clean` subcommands.
+- `install.php` activation schema and `uninstall.php` cleanup.
+- Test fixtures (`tests/fixtures/basic-export.xml`) and PHPUnit tests for jobs, batches, and preflight.
+- `docs/IMPLEMENTATION_STATUS.md` tracking rebuild progress.
+
+### Changed
+- Plugin renamed to **Better WordPress Importer** (v3.0.0).
+- Import step 3 now creates a persisted job and uses batch polling (SSE path retained but deprecated).
+- `get_preliminary_information()` records `item_positions` byte offsets per `<item>`.
+- `cache_flush_interval` option (default 200) replaces hardcoded cache flush interval.
+- Diagnostic upload logging gated behind `WP_DEBUG && WXR_IMPORTER_DIAGNOSTICS`, writes to `error_log` not plugin root.
+- Chunk upload directories get `web.config` (IIS) protection alongside `.htaccess`.
+- `.gitignore` allows `tests/fixtures/*.xml`.
+
+### Fixed
+- Abandoned chunk directories cleaned via daily `wxr_importer_cleanup_chunks` cron.
+- Cancel import now marks associated jobs as `cancelled`.
+
+### Security
+- Removed web-accessible `wxr-upload-debug.log` writes from plugin root.
+
+### Known Limitations
+- Legacy SSE endpoint (`wxr-import`) remains for backward compatibility; will be removed in a future cleanup pass.
+- `XMLReader` fast-forward to batch cursor is O(n) per batch — WP-CLI recommended for very large files.
+- Phase 6 cleanup (full SSE removal, legacy meta migration) not yet complete.
+
+---
+
+## [2.1.0] - 29/06/2026
+
+### Added
+- **Chunked XML browser uploads** using Plupload `chunk_size` (`8mb`) so large WXR/XML files are no longer sent as one huge request.
+- Server-side chunk assembly for XML uploads, including upload-session isolation, temporary chunk storage, final XML validation, attachment registration, and scheduled cleanup.
+- Upload diagnostics written to `wxr-upload-debug.log` for cases where webserver/proxy/FastCGI failures happen before WordPress can write to `WP_DEBUG_LOG`.
+- Detailed upload error messages in `assets/intro.js`, including HTTP status, response snippet, and filename.
+- Import-stream diagnostics for `stream_import()`, including stream entry, settings load, file resolution, import start/return, cleanup, completion emission, and shutdown state.
+- Stronger SSE flushing for normal progress messages and logger events.
+- Import-stream frontend error context showing the last received stream action before interruption.
+- Import JS cache busting via `filemtime()` so browser refreshes load the current import handler after plugin changes.
+- Auditor/rebuild documentation under `docs/`:
+  - `AUDITOR_PROMPT.md`
+  - `PROJECT_CONTEXT_FOR_AUDIT.md`
+  - `ARCHITECTURE_AUDIT.md`
+  - `REBUILD_PLAN.md`
+  - `TEST_PLAN.md`
+  - `UI_UX_PLAN.md`
+  - `MIGRATION_AND_COMPATIBILITY.md`
+  - `BUILDER_PROMPT.md`
+  - `REVIEW_CHECKLIST.md`
+
+### Changed
+- Upload script versioning now uses `filemtime()` instead of a static or false version.
+- Plupload settings now pass upload action, nonce, and upload session through top-level uploader params.
+- No-JS upload field now uses `name="import"` to match the async upload handler.
+- Chunked upload handling now uses the original filename from the Plupload `name` request parameter instead of validating the temporary chunk filename (`blob`).
+- Browser-uploaded assembled XML files are registered as private import attachments with `application/xml`.
+- Import progress handling now attempts reconnects after a dropped EventSource connection as a short-term mitigation.
+- Cancel import now clears any pending reconnect timer before closing the stream.
+- `stream_import()` now restores the stored `is_local_file` flag before cleanup so local-path imports are not treated as browser uploads.
+
+### Fixed
+- Fixed false "Invalid file type" errors on chunked uploads caused by Plupload sending chunk file names as `blob`.
+- Fixed missing diagnostics for upload failures that never reached WordPress/PHP.
+- Fixed import JS error handling so malformed SSE payloads show a user-facing error instead of silently breaking the page.
+- Fixed possible corrupted Plupload JSON responses by discarding unexpected buffered output before sending async upload responses.
+- Fixed SSE messages and log events not explicitly flushing PHP output buffers before `flush()`.
+
+### Security
+- Chunk upload temporary directories now include basic `index.php` and `.htaccess` protections.
+- Chunked upload validates XML extension and leading XML/WXR content before registering the assembled file.
+- Diagnostic logging was added for debugging but is not suitable as the final production logging architecture; the audit identifies this as a must-fix before a rebuild release.
+
+### Documentation
+- Added an architecture audit and phased rebuild plan for the future **Better WordPress Importer** direction.
+- Added a builder prompt and review checklist for handing the rebuild to another model/developer.
+- Documented that the current long `admin-ajax.php`/SSE import flow is fragile and should be replaced with a real resumable job/batch architecture.
+- Documented that reconnect/deduplication is only a temporary mitigation and not true server-side resumability.
+
+### Development / Local Environment
+- During local debugging, LocalWP Apache/FastCGI settings were adjusted outside the plugin to allow larger and longer-running local requests:
+  - `FcgidMaxRequestLen 1073741824`
+  - `FcgidIOTimeout 3600`
+  - `FcgidBusyTimeout 3600`
+- These LocalWP server changes are not plugin code, do not affect production hosting, and should not be considered the long-term importer architecture.
+
+### Known Limitations
+- The import engine still fundamentally relies on one long request for the actual import.
+- EventSource reconnects can rerun the import and rely on deduplication, but this is not true persisted resumability.
+- A full rebuild should introduce import jobs, persisted mappings, batch processing, resumable finalization, and real server-side progress.
+
+---
+
 ## [2.0.3] - 26/05/2026
 
 ### Added

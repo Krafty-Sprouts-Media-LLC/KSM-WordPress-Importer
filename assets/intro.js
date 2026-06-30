@@ -12,8 +12,9 @@
 
 		// Update the progress bar width and percentage text
 		if ( attr.size && attr.loaded ) {
-			$( '.bar', $status ).width( Math.round( ( attr.loaded / attr.size ) * 200 ) );
-			$( '.percent', $status ).html( ( attr.percent || 0 ) + '%' );
+			var pct = attr.percent || Math.round( ( attr.loaded / attr.size ) * 100 );
+			$( '.bar', $status ).css( 'width', pct + '%' );
+			$( '.percent', $status ).html( pct + '%' );
 		}
 
 		$( '.drag-drop-status' ).empty().append( $status );
@@ -149,12 +150,12 @@
 			frame.open();
 		});
 
-		// When a file is selected from the media library, submit the form directly
+		// When a file is selected from the media library, submit the form directly.
 		frame.on( 'select', function () {
 			var attachment = frame.state().get( 'selection' ).first().toJSON();
-			$( '#import-selected-id' ).val( attachment.id );
-			$( '#import-selected-id' ).parents( 'form' )[ 0 ].submit();
-		});
+			$( '#import-selected-id-media' ).val( attachment.id );
+			$( '#wxr-media-form' ).submit();
+		} );
 	});
 
 })( jQuery );

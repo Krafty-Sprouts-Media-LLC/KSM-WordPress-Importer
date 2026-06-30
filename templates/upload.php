@@ -42,8 +42,11 @@
 				); ?>
 			</p>
 			<div class="media-item">
+				<div class="wxr-upload-bar-header">
+					<span class="wxr-upload-label"><?php esc_html_e( 'Uploading&hellip;', 'wordpress-importer' ); ?></span>
+					<span class="percent wxr-upload-percent">0%</span>
+				</div>
 				<div class="progress">
-					<div class="percent">0%</div>
 					<div class="bar"></div>
 				</div>
 			</div>

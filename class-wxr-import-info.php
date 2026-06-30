@@ -22,4 +22,12 @@ class WXR_Import_Info {
 
 	public $generator = '';
 	public $version;
+
+	/**
+	 * Byte offsets for each <item> element (when supported by XMLReader).
+	 *
+	 * @since 3.0.0
+	 * @var array<int, int>
+	 */
+	public $item_positions = array();
 }
