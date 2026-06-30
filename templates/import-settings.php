@@ -17,6 +17,7 @@ defined( 'ABSPATH' ) || exit;
 /** @var int $entity_total */
 /** @var array $users */
 $counts = isset( $preflight['counts'] ) ? $preflight['counts'] : array();
+$authors = isset( $preflight['authors'] ) && is_array( $preflight['authors'] ) ? $preflight['authors'] : array();
 ?>
 <div class="better-importer-card">
 	<h2><?php esc_html_e( 'Import Summary', 'better-wordpress-importer' ); ?></h2>
@@ -55,6 +56,52 @@ $counts = isset( $preflight['counts'] ) ? $preflight['counts'] : array();
 			<?php endforeach; ?>
 		</select>
 	</p>
+
+	<?php if ( ! empty( $authors ) ) : ?>
+		<div class="better-importer-author-map">
+			<h3><?php esc_html_e( 'Author Mapping', 'better-wordpress-importer' ); ?></h3>
+			<table class="widefat striped">
+				<thead>
+					<tr>
+						<th scope="col"><?php esc_html_e( 'Source author', 'better-wordpress-importer' ); ?></th>
+						<th scope="col"><?php esc_html_e( 'Destination user', 'better-wordpress-importer' ); ?></th>
+					</tr>
+				</thead>
+				<tbody>
+					<?php foreach ( $authors as $author ) : ?>
+						<?php
+						$source_id = isset( $author['id'] ) ? (string) $author['id'] : '';
+						$login     = isset( $author['login'] ) ? (string) $author['login'] : ( isset( $author['title'] ) ? (string) $author['title'] : '' );
+						$email     = isset( $author['email'] ) ? (string) $author['email'] : '';
+						$name      = isset( $author['display_name'] ) ? (string) $author['display_name'] : '';
+						$map_key   = '' !== $source_id ? $source_id : $login;
+						?>
+						<tr>
+							<td>
+								<strong><?php echo esc_html( '' !== $name ? $name : $login ); ?></strong>
+								<?php if ( '' !== $login ) : ?>
+									<br /><code><?php echo esc_html( $login ); ?></code>
+								<?php endif; ?>
+								<?php if ( '' !== $email ) : ?>
+									<br /><span class="description"><?php echo esc_html( $email ); ?></span>
+								<?php endif; ?>
+							</td>
+							<td>
+								<select name="user_mapping[<?php echo esc_attr( $map_key ); ?>]">
+									<option value=""><?php esc_html_e( 'Create if missing / map matching user', 'better-wordpress-importer' ); ?></option>
+									<?php foreach ( $users as $user ) : ?>
+										<option value="<?php echo esc_attr( $user->ID ); ?>">
+											<?php echo esc_html( $user->display_name . ' (' . $user->user_login . ')' ); ?>
+										</option>
+									<?php endforeach; ?>
+								</select>
+							</td>
+						</tr>
+					<?php endforeach; ?>
+				</tbody>
+			</table>
+		</div>
+	<?php endif; ?>
 
 	<p>
 		<label>

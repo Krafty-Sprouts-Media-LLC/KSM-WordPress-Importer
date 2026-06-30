@@ -326,33 +326,13 @@ class Better_Import_Job {
 			);
 		}
 
-		$preflight = new Better_Preflight();
-		$scan      = $preflight->scan( $file_path );
-		if ( is_wp_error( $scan ) ) {
-			return $scan;
-		}
-
-		$manifest       = $scan['manifest'];
-		$preflight_data = $scan['preflight'];
-		$counts         = isset( $preflight_data['counts'] ) ? $preflight_data['counts'] : array();
-
 		$job                  = new self();
 		$job->status          = 'scanning';
 		$job->phase           = 'queueing';
 		$job->file_path       = $file_path;
 		$job->attachment_id   = absint( $attachment_id );
 		$job->options         = $options;
-		$job->preflight_data  = $preflight_data;
-		$job->item_manifest   = $manifest;
 		$job->user_id         = get_current_user_id();
-		$job->total_users     = isset( $counts['users'] ) ? (int) $counts['users'] : 0;
-		$job->total_terms     = isset( $counts['terms'] ) ? (int) $counts['terms'] : 0;
-		$job->total_posts     = isset( $counts['posts'] ) ? (int) $counts['posts'] : 0;
-		$job->total_media     = isset( $counts['attachments'] ) ? (int) $counts['attachments'] : 0;
-		$job->scanned_users   = $job->total_users;
-		$job->scanned_terms   = $job->total_terms;
-		$job->scanned_posts   = $job->total_posts;
-		$job->scanned_media   = $job->total_media;
 
 		$repo = new Better_Import_Job_Repository();
 		$saved = $repo->save( $job );
@@ -361,10 +341,79 @@ class Better_Import_Job {
 		}
 
 		$queue_repo = new Better_Import_Queue_Repository();
-		$seeded     = $queue_repo->seed_from_manifest( $job->id, $manifest );
-		if ( is_wp_error( $seeded ) ) {
-			return $seeded;
+		$parser     = new Better_WXR_Parser();
+		$batch_manifest = array();
+		$batch_payloads = array();
+
+		$flush_batch = function() use ( $queue_repo, $job, &$batch_manifest, &$batch_payloads ) {
+			if ( empty( $batch_manifest ) ) {
+				return true;
+			}
+
+			$result = $queue_repo->seed_from_manifest( $job->id, $batch_manifest, $batch_payloads );
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+
+			$batch_manifest = array();
+			$batch_payloads = array();
+
+			return true;
+		};
+
+		$scan = $parser->parse_file(
+			$file_path,
+			function( $entry, $payload ) use ( $options, &$batch_manifest, &$batch_payloads, $flush_batch ) {
+				$batch_manifest[] = $entry;
+				$skip_payload = (
+					isset( $entry['t'] )
+					&& 'attachment' === $entry['t']
+					&& empty( $options['fetch_attachments'] )
+				);
+
+				if ( isset( $entry['i'] ) && ! $skip_payload ) {
+					$batch_payloads[ (int) $entry['i'] ] = $payload;
+				}
+
+				if ( count( $batch_manifest ) >= Better_Import_Queue_Repository::INSERT_BATCH_SIZE ) {
+					return $flush_batch();
+				}
+
+				return true;
+			}
+		);
+
+		if ( ! is_wp_error( $scan ) ) {
+			$flushed = $flush_batch();
+			if ( is_wp_error( $flushed ) ) {
+				$scan = $flushed;
+			}
 		}
+
+		if ( is_wp_error( $scan ) ) {
+			$job->status = 'failed';
+			$job->phase  = 'queueing';
+			$repo->save( $job );
+
+			return $scan;
+		}
+
+		$manifest       = $scan['manifest'];
+		$preflight_data = $scan['preflight'];
+		$counts         = isset( $preflight_data['counts'] ) ? $preflight_data['counts'] : array();
+
+		$job->preflight_data   = $preflight_data;
+		$job->item_manifest    = $manifest;
+		$job->total_users      = isset( $counts['users'] ) ? (int) $counts['users'] : 0;
+		$job->total_terms      = isset( $counts['terms'] ) ? (int) $counts['terms'] : 0;
+		$job->total_posts      = isset( $counts['posts'] ) ? (int) $counts['posts'] : 0;
+		$job->total_comments   = isset( $counts['comments'] ) ? (int) $counts['comments'] : 0;
+		$job->total_media      = isset( $counts['attachments'] ) ? (int) $counts['attachments'] : 0;
+		$job->scanned_users    = $job->total_users;
+		$job->scanned_terms    = $job->total_terms;
+		$job->scanned_posts    = $job->total_posts;
+		$job->scanned_comments = $job->total_comments;
+		$job->scanned_media    = $job->total_media;
 
 		$queued_count = $queue_repo->count_for_job( $job->id );
 		$expected     = count( $manifest );
@@ -388,6 +437,15 @@ class Better_Import_Job {
 		if ( is_wp_error( $saved ) ) {
 			return $saved;
 		}
+
+		$logger = new Better_Logger( $job->id );
+		$logger->info(
+			sprintf(
+				/* translators: %d: queued entity count */
+				__( 'Import queued with %d entities.', 'better-wordpress-importer' ),
+				$queued_count
+			)
+		);
 
 		/**
 		 * Fires after a new import job is created and queue rows are seeded.
@@ -528,9 +586,11 @@ class Better_Import_Job {
 	 *
 	 * @since 1.2.0
 	 *
+	 * @param int $log_after_id Last log ID already seen by the caller.
+	 *
 	 * @return array<string, mixed>
 	 */
-	public function to_status_array() {
+	public function to_status_array( $log_after_id = 0 ) {
 		$queue_repo   = new Better_Import_Queue_Repository();
 		$queue_counts = $queue_repo->get_status_summary( $this->id );
 		$active_item  = $queue_repo->get_active_item( $this->id );
@@ -551,6 +611,13 @@ class Better_Import_Job {
 		}
 
 		$logger = new Better_Logger( $this->id );
+		$logs   = $log_after_id > 0 ? $logger->get_after( $log_after_id, 50 ) : $logger->get_recent( 50 );
+		$cursor = absint( $log_after_id );
+		foreach ( $logs as $entry ) {
+			if ( isset( $entry['id'] ) ) {
+				$cursor = max( $cursor, absint( $entry['id'] ) );
+			}
+		}
 
 		$status = array(
 			'job_id'            => $this->id,
@@ -594,7 +661,8 @@ class Better_Import_Job {
 			'started_at'        => $this->started_at,
 			'completed_at'      => $this->completed_at,
 			'file_title'        => isset( $this->preflight_data['title'] ) ? $this->preflight_data['title'] : '',
-			'logs'              => $logger->get_recent( 15 ),
+			'logs'              => $logs,
+			'log_cursor'        => $cursor,
 			'can_pause'         => in_array( $this->status, array( 'queued', 'processing' ), true ),
 			'can_resume'        => 'paused' === $this->status,
 			'can_cancel'        => ! $this->is_terminal(),

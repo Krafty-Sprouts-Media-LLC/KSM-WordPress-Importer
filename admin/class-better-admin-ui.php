@@ -518,7 +518,7 @@ class Better_Admin_UI {
 			'better-importer-admin',
 			BETTER_IMPORTER_URL . 'assets/css/admin.css',
 			array(),
-			BETTER_IMPORTER_VERSION
+			$this->get_asset_version( 'assets/css/admin.css' )
 		);
 
 		if ( 'tools_page_better-importer-history' === $hook || 'tools_page_better-importer-settings' === $hook ) {
@@ -536,7 +536,7 @@ class Better_Admin_UI {
 					'better-importer-progress',
 					BETTER_IMPORTER_URL . 'assets/js/import-progress.js',
 					array( 'jquery' ),
-					BETTER_IMPORTER_VERSION,
+					$this->get_asset_version( 'assets/js/import-progress.js' ),
 					true
 				);
 				wp_localize_script(
@@ -575,7 +575,7 @@ class Better_Admin_UI {
 			'better-importer-upload',
 			BETTER_IMPORTER_URL . 'assets/js/import-upload.js',
 			array( 'jquery', 'underscore', 'wp-util', 'wp-backbone', 'wp-plupload' ),
-			BETTER_IMPORTER_VERSION,
+			$this->get_asset_version( 'assets/js/import-upload.js' ),
 			true
 		);
 
@@ -602,6 +602,25 @@ class Better_Admin_UI {
 		if ( 1 === $step ) {
 			return;
 		}
+	}
+
+	/**
+	 * Get a cache-busting asset version.
+	 *
+	 * @since 1.5.0
+	 *
+	 * @param string $relative_path Asset path relative to the plugin root.
+	 *
+	 * @return string Asset version.
+	 */
+	protected function get_asset_version( $relative_path ) {
+		$path = BETTER_IMPORTER_PATH . ltrim( $relative_path, '/\\' );
+
+		if ( file_exists( $path ) ) {
+			return (string) filemtime( $path );
+		}
+
+		return BETTER_IMPORTER_VERSION;
 	}
 
 	/**

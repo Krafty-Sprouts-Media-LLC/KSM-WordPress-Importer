@@ -70,6 +70,7 @@ class Better_Preflight {
 			'home'        => '',
 			'siteurl'     => '',
 			'wxr_version' => $wxr_version,
+			'authors'     => array(),
 			'counts'      => array(
 				'users'       => 0,
 				'terms'       => 0,
@@ -97,6 +98,9 @@ class Better_Preflight {
 						case 'wp:post_type':
 							$item_type = $reader->readString();
 							break;
+						case 'wp:comment':
+							++$preflight['counts']['comments'];
+							break;
 					}
 					continue;
 				}
@@ -105,32 +109,28 @@ class Better_Preflight {
 					case 'wp:wxr_version':
 						$wxr_version = $reader->readString();
 						$preflight['wxr_version'] = $wxr_version;
-						$reader->next( 'wp:wxr_version' );
 						break;
 
 					case 'generator':
 						$preflight['generator'] = $reader->readString();
-						$reader->next( 'generator' );
 						break;
 
 					case 'title':
 						$preflight['title'] = $reader->readString();
-						$reader->next( 'title' );
 						break;
 
 					case 'wp:base_site_url':
 						$preflight['siteurl'] = $reader->readString();
-						$reader->next( 'wp:base_site_url' );
 						break;
 
 					case 'wp:base_blog_url':
 						$preflight['home'] = $reader->readString();
-						$reader->next( 'wp:base_blog_url' );
 						break;
 
 					case 'wp:author':
 						$author = $this->read_author_summary( $reader );
 						if ( ! empty( $author ) ) {
+							$preflight['authors'][] = $author;
 							$manifest[] = array(
 								'i'     => $index,
 								't'     => 'user',
@@ -140,7 +140,6 @@ class Better_Preflight {
 							++$index;
 							++$preflight['counts']['users'];
 						}
-						$reader->next( 'wp:author' );
 						break;
 
 					case 'wp:category':
@@ -155,7 +154,6 @@ class Better_Preflight {
 							++$index;
 							++$preflight['counts']['terms'];
 						}
-						$reader->next( 'wp:category' );
 						break;
 
 					case 'wp:tag':
@@ -170,7 +168,6 @@ class Better_Preflight {
 							++$index;
 							++$preflight['counts']['terms'];
 						}
-						$reader->next( 'wp:tag' );
 						break;
 
 					case 'wp:term':
@@ -185,7 +182,6 @@ class Better_Preflight {
 							++$index;
 							++$preflight['counts']['terms'];
 						}
-						$reader->next( 'wp:term' );
 						break;
 
 					case 'item':
@@ -288,6 +284,8 @@ class Better_Preflight {
 		$depth = $reader->depth;
 		$id    = '';
 		$title = '';
+		$email = '';
+		$name  = '';
 
 		while ( $reader->read() ) {
 			if ( XMLReader::END_ELEMENT === $reader->nodeType && 'wp:author' === $reader->name && $reader->depth === $depth ) {
@@ -305,6 +303,12 @@ class Better_Preflight {
 				case 'wp:author_login':
 					$title = $reader->readString();
 					break;
+				case 'wp:author_email':
+					$email = $reader->readString();
+					break;
+				case 'wp:author_display_name':
+					$name = $reader->readString();
+					break;
 			}
 		}
 
@@ -313,8 +317,11 @@ class Better_Preflight {
 		}
 
 		return array(
-			'id'    => $id,
-			'title' => $title,
+			'id'           => $id,
+			'title'        => $title,
+			'login'        => $title,
+			'email'        => $email,
+			'display_name' => $name,
 		);
 	}
 

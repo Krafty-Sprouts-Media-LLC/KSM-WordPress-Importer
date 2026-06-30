@@ -13,12 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Daily `better_importer_cleanup_chunks` cron for abandoned chunk sessions.
 - Format validation on preflight scan, local-file path checks, and both single and chunked AJAX uploads.
 
+- Author Mapping on the import settings screen, allowing each source WXR author to be mapped to a destination user before the job starts.
+- Full chronological Activity Log output for import jobs, including queue/start messages, mapped existing entities, batch summaries, explicit errors, and completion.
+
 ### Fixed
 - Chunked uploads no longer redirect to settings on partial chunk responses; redirect only happens when `attachment_id` is returned.
+
+- Queue rows are now seeded with persistent `parsed_payload` data during the initial parse so batch processing never reopens XML to seek by entity index.
+- Existing users are mapped by login/email instead of repeatedly failing with "username already exists" errors.
+- Missing custom taxonomies are reported as explicit failed/retryable work instead of being silently skipped or logged as generic invalid taxonomy errors.
+- Activity Log rendering now clears stale browser-side entries and escapes log output.
+- WP-CLI `--no-attachments` handling now maps correctly to the importer attachment option.
 
 ### Changed
 - README, CONTRIBUTING, and `composer.json` updated for the 1.0 rebuild; removed obsolete `.travis.yml` and `find-deprecated-usage.php`.
 - Reference copies consolidated under `.legacy/`; duplicate `legacy/` and root `WordPress-Importer-master/` trees removed.
+
+- Admin CSS and JS assets use file modification times for cache-busting during active development.
+- Import progress counts now include comments in total/scanned entity reporting.
 
 ---
 

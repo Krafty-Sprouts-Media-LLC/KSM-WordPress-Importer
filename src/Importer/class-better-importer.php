@@ -50,8 +50,28 @@ class Better_Importer {
 		$original_id  = isset( $data['ID'] ) ? (int) $data['ID'] : 0;
 		$original_slug = isset( $data['user_login'] ) ? $data['user_login'] : '';
 
+		$mapped_user_id = $this->get_configured_user_mapping( $job, $original_id, $original_slug );
+		if ( $mapped_user_id > 0 ) {
+			$remapper->set( 'user', $original_id, $mapped_user_id );
+			$remapper->set( 'user_slug', $original_slug, $mapped_user_id );
+
+			return array(
+				'status'        => 'skipped',
+				'new_entity_id' => $mapped_user_id,
+				'message'       => sprintf(
+					/* translators: 1: source user login, 2: local user ID */
+					__( 'Mapped source user "%1$s" to selected local user #%2$d.', 'better-wordpress-importer' ),
+					$original_slug,
+					$mapped_user_id
+				),
+			);
+		}
+
 		if ( $remapper->has( 'user', $original_id ) || $remapper->has( 'user_slug', $original_slug ) ) {
-			return array( 'status' => 'skipped' );
+			return array(
+				'status'  => 'skipped',
+				'message' => __( 'User was already mapped earlier in this import.', 'better-wordpress-importer' ),
+			);
 		}
 
 		$login = $original_slug;
@@ -59,8 +79,37 @@ class Better_Importer {
 			$login = $job->options['user_slug_override'][ $login ];
 		}
 
+		$login = sanitize_user( $login, true );
+		if ( '' === $login ) {
+			return array(
+				'status' => 'failed',
+				'error'  => __( 'User is missing a valid login.', 'better-wordpress-importer' ),
+			);
+		}
+
+		$existing_user = get_user_by( 'login', $login );
+		if ( ! $existing_user && ! empty( $data['user_email'] ) ) {
+			$existing_user = get_user_by( 'email', $data['user_email'] );
+		}
+
+		if ( $existing_user ) {
+			$remapper->set( 'user', $original_id, $existing_user->ID );
+			$remapper->set( 'user_slug', $original_slug, $existing_user->ID );
+
+			return array(
+				'status'        => 'skipped',
+				'new_entity_id' => (int) $existing_user->ID,
+				'message'       => sprintf(
+					/* translators: 1: source user login, 2: local user ID */
+					__( 'Mapped existing user "%1$s" to local user #%2$d.', 'better-wordpress-importer' ),
+					$login,
+					(int) $existing_user->ID
+				),
+			);
+		}
+
 		$userdata = array(
-			'user_login' => sanitize_user( $login, true ),
+			'user_login' => $login,
 			'user_pass'  => wp_generate_password(),
 		);
 
@@ -112,6 +161,18 @@ class Better_Importer {
 			);
 		}
 
+		if ( ! taxonomy_exists( $taxonomy ) ) {
+			return array(
+				'status' => 'failed',
+				'code'   => 'better_importer_taxonomy_missing',
+				'error'  => sprintf(
+					/* translators: %s: taxonomy slug */
+					__( 'Taxonomy "%s" is not registered on this site. Install/activate the plugin or theme that registers it, then retry this item.', 'better-wordpress-importer' ),
+					$taxonomy
+				),
+			);
+		}
+
 		$mapping_key = sha1( $taxonomy . ':' . $slug );
 		$existing    = $this->term_exists( $data );
 
@@ -121,6 +182,12 @@ class Better_Importer {
 			return array(
 				'status'        => 'skipped',
 				'new_entity_id' => $existing,
+				'message'       => sprintf(
+					/* translators: 1: term name, 2: taxonomy slug */
+					__( 'Mapped existing term "%1$s" in taxonomy "%2$s".', 'better-wordpress-importer' ),
+					$data['name'],
+					$taxonomy
+				),
 			);
 		}
 
@@ -128,6 +195,12 @@ class Better_Importer {
 			return array(
 				'status'        => 'skipped',
 				'new_entity_id' => $remapper->get( 'term', $mapping_key ),
+				'message'       => sprintf(
+					/* translators: 1: term name, 2: taxonomy slug */
+					__( 'Term "%1$s" in taxonomy "%2$s" was already mapped earlier in this import.', 'better-wordpress-importer' ),
+					$data['name'],
+					$taxonomy
+				),
 			);
 		}
 
@@ -198,6 +271,12 @@ class Better_Importer {
 			return array(
 				'status'        => 'skipped',
 				'new_entity_id' => $existing,
+				'message'       => sprintf(
+					/* translators: 1: post title, 2: local post ID */
+					__( 'Mapped existing post "%1$s" to local post #%2$d.', 'better-wordpress-importer' ),
+					isset( $data['post_title'] ) ? $data['post_title'] : '',
+					$existing
+				),
 			);
 		}
 
@@ -308,17 +387,40 @@ class Better_Importer {
 	 * @param int               $post_id Post ID.
 	 * @param array<int, array> $terms   Term rows from payload.
 	 *
-	 * @return true
+	 * @return true|WP_Error
 	 */
 	public function assign_terms( $post_id, array $terms ) {
 		$grouped = array();
+		$missing = $this->get_missing_term_taxonomies( $terms );
 
 		foreach ( $terms as $term ) {
 			$taxonomy = isset( $term['taxonomy'] ) ? $term['taxonomy'] : 'category';
+			if ( ! taxonomy_exists( $taxonomy ) ) {
+				continue;
+			}
+
+			$name = isset( $term['slug'] ) ? $term['slug'] : ( isset( $term['name'] ) ? $term['name'] : '' );
+			if ( '' === $name ) {
+				continue;
+			}
+
 			if ( ! isset( $grouped[ $taxonomy ] ) ) {
 				$grouped[ $taxonomy ] = array();
 			}
-			$grouped[ $taxonomy ][] = isset( $term['slug'] ) ? $term['slug'] : $term['name'];
+			$grouped[ $taxonomy ][] = $name;
+		}
+
+		if ( ! empty( $missing ) ) {
+			$missing = array_values( array_unique( $missing ) );
+
+			return new WP_Error(
+				'better_importer_taxonomy_missing',
+				sprintf(
+					/* translators: %s: comma-separated taxonomy slugs */
+					__( 'Cannot assign terms because these taxonomies are not registered on this site: %s. Install/activate the plugin or theme that registers them, then retry this item.', 'better-wordpress-importer' ),
+					implode( ', ', $missing )
+				)
+			);
 		}
 
 		foreach ( $grouped as $taxonomy => $names ) {
@@ -326,6 +428,28 @@ class Better_Importer {
 		}
 
 		return true;
+	}
+
+	/**
+	 * Find term taxonomies that are missing on this site.
+	 *
+	 * @since 1.5.0
+	 *
+	 * @param array<int, array> $terms Term rows from payload.
+	 *
+	 * @return array<int, string> Missing taxonomy slugs.
+	 */
+	public function get_missing_term_taxonomies( array $terms ) {
+		$missing = array();
+
+		foreach ( $terms as $term ) {
+			$taxonomy = isset( $term['taxonomy'] ) ? $term['taxonomy'] : 'category';
+			if ( ! taxonomy_exists( $taxonomy ) ) {
+				$missing[] = $taxonomy;
+			}
+		}
+
+		return array_values( array_unique( $missing ) );
 	}
 
 	/**
@@ -389,6 +513,37 @@ class Better_Importer {
 		}
 
 		return $postarr;
+	}
+
+	/**
+	 * Get a manually configured destination user mapping.
+	 *
+	 * @since 1.5.0
+	 *
+	 * @param Better_Import_Job $job           Import job.
+	 * @param int               $original_id   Source user ID.
+	 * @param string            $original_slug Source user login.
+	 *
+	 * @return int Destination user ID, or zero when unmapped.
+	 */
+	protected function get_configured_user_mapping( Better_Import_Job $job, $original_id, $original_slug ) {
+		$mapping = isset( $job->options['user_id_map'] ) && is_array( $job->options['user_id_map'] ) ? $job->options['user_id_map'] : array();
+		$keys    = array(
+			(string) $original_id,
+			(string) $original_slug,
+			sanitize_user( (string) $original_slug, true ),
+		);
+
+		foreach ( $keys as $key ) {
+			if ( '' !== $key && ! empty( $mapping[ $key ] ) ) {
+				$user_id = absint( $mapping[ $key ] );
+				if ( get_user_by( 'ID', $user_id ) ) {
+					return $user_id;
+				}
+			}
+		}
+
+		return 0;
 	}
 
 	/**

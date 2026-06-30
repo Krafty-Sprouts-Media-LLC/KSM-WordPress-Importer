@@ -15,6 +15,8 @@
 	var pollTimer = null;
 	var isPaused = false;
 	var isTerminal = false;
+	var lastLogId = 0;
+	var hasRenderedInitialLogs = false;
 
 	function request( action, method, data ) {
 		data = data || {};
@@ -49,16 +51,37 @@
 		$( '#better-importer-count-grid' ).html( html );
 	}
 
-	function renderLogs( logs ) {
-		if ( ! logs || ! logs.length ) {
-			return;
+	function buildLogHtml( logs ) {
+		var html = '';
+
+		if ( logs && logs.length ) {
+			logs.forEach( function ( entry ) {
+				var createdAt = $( '<div>' ).text( entry.created_at || '' ).html();
+				var message = $( '<div>' ).text( entry.message || '' ).html();
+				var level = String( entry.level || 'info' ).replace( /[^a-z0-9_-]/gi, '' ).toLowerCase();
+				var levelLabel = $( '<div>' ).text( level ).html();
+
+				html += '<li class="better-importer-log-entry better-importer-log-entry-' + level + '"><code>' + createdAt + '</code> <strong>' + levelLabel + '</strong> ' + message + '</li>';
+			} );
 		}
 
-		var html = '';
-		logs.forEach( function ( entry ) {
-			html += '<li><code>' + entry.created_at + '</code> ' + entry.message + '</li>';
-		} );
-		$( '#better-importer-log-list' ).html( html );
+		return html;
+	}
+
+	function renderLogs( logs ) {
+		var $list = $( '#better-importer-log-list' );
+		var html = buildLogHtml( logs );
+
+		if ( ! hasRenderedInitialLogs ) {
+			$list.html( html );
+			hasRenderedInitialLogs = true;
+		} else if ( html ) {
+			$list.append( html );
+		}
+
+		while ( $list.children().length > 200 ) {
+			$list.children().first().remove();
+		}
 	}
 
 	function renderStatus( status ) {
@@ -86,6 +109,9 @@
 
 		renderCounts( status );
 		renderLogs( status.logs );
+		if ( status.log_cursor ) {
+			lastLogId = Math.max( lastLogId, parseInt( status.log_cursor, 10 ) || 0 );
+		}
 
 		$( '#better-importer-pause-btn' ).text( isPaused ? betterImporterProgress.strings.resume : betterImporterProgress.strings.pause );
 
@@ -107,7 +133,9 @@
 	}
 
 	function pollStatus() {
-		request( 'better-import-status', 'GET' ).done( function ( response ) {
+		request( 'better-import-status', 'GET', {
+			log_after_id: lastLogId
+		} ).done( function ( response ) {
 			if ( response.success ) {
 				renderStatus( response.data );
 			}
@@ -120,7 +148,9 @@
 		}
 
 		batchInFlight = true;
-		request( 'better-import-batch', 'POST' ).always( function () {
+		request( 'better-import-batch', 'POST', {
+			log_after_id: lastLogId
+		} ).always( function () {
 			batchInFlight = false;
 		} ).done( function ( response ) {
 			if ( response.success ) {

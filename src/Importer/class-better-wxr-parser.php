@@ -29,37 +29,93 @@ class Better_WXR_Parser {
 	);
 
 	/**
-	 * Parse one entity at the given manifest index.
+	 * Parse a WXR file into a compact manifest and persisted queue payloads.
 	 *
 	 * @since 1.1.0
 	 *
-	 * @param string $file_path    Absolute WXR path.
-	 * @param int    $entity_index Zero-based manifest index.
+	 * @param string        $file_path       Absolute WXR path.
+	 * @param callable|null $entity_callback Optional callback for each parsed entity.
 	 *
-	 * @return array<string, mixed>|WP_Error Normalized payload.
+	 * @return array<string, mixed>|WP_Error Parsed scan data.
 	 */
-	public function parse_entity_at_index( $file_path, $entity_index ) {
+	public function parse_file( $file_path, $entity_callback = null ) {
+		if ( ! is_readable( $file_path ) ) {
+			return new WP_Error(
+				'better_importer.parse.unreadable',
+				__( 'The export file could not be read.', 'better-wordpress-importer' )
+			);
+		}
+
+		$format = Better_Format_Detector::validate_for_import( $file_path );
+		if ( is_wp_error( $format ) ) {
+			return $format;
+		}
+
 		$reader = $this->open_reader( $file_path );
 		if ( is_wp_error( $reader ) ) {
 			return $reader;
 		}
 
-		$current = 0;
+		wp_raise_memory_limit( 'admin' );
+
+		$manifest    = array();
+		$payloads    = array();
+		$index       = 0;
+		$wxr_version = '1.0';
+		$preflight   = array(
+			'title'       => '',
+			'generator'   => '',
+			'home'        => '',
+			'siteurl'     => '',
+			'wxr_version' => $wxr_version,
+			'authors'     => array(),
+			'counts'      => array(
+				'users'       => 0,
+				'terms'       => 0,
+				'posts'       => 0,
+				'attachments' => 0,
+				'comments'    => 0,
+			),
+		);
+
+		$skip_depth = null;
+
 		while ( $reader->read() ) {
+			if ( null !== $skip_depth ) {
+				if ( $reader->depth > $skip_depth || ( XMLReader::END_ELEMENT === $reader->nodeType && $reader->depth === $skip_depth ) ) {
+					continue;
+				}
+
+				$skip_depth = null;
+			}
+
 			if ( XMLReader::ELEMENT !== $reader->nodeType ) {
 				continue;
 			}
 
 			if ( ! in_array( $reader->name, self::ENTITY_ELEMENTS, true ) ) {
+				switch ( $reader->name ) {
+					case 'wp:wxr_version':
+						$wxr_version = $reader->readString();
+						$preflight['wxr_version'] = $wxr_version;
+						break;
+					case 'generator':
+						$preflight['generator'] = $reader->readString();
+						break;
+					case 'title':
+						$preflight['title'] = $reader->readString();
+						break;
+					case 'wp:base_site_url':
+						$preflight['siteurl'] = $reader->readString();
+						break;
+					case 'wp:base_blog_url':
+						$preflight['home'] = $reader->readString();
+						break;
+				}
 				continue;
 			}
 
-			if ( $current < $entity_index ) {
-				++$current;
-				$reader->next( $reader->name );
-				continue;
-			}
-
+			$element_name = $reader->name;
 			$node = $reader->expand();
 			if ( false === $node ) {
 				$reader->close();
@@ -69,21 +125,52 @@ class Better_WXR_Parser {
 				);
 			}
 
-			$parsed = $this->parse_entity_node( $reader->name, $node );
-			$reader->close();
+			$parsed = $this->parse_entity_node( $element_name, $node );
 
 			if ( is_wp_error( $parsed ) ) {
+				$reader->close();
 				return $parsed;
 			}
 
-			return $parsed;
+			$summary = $this->payload_to_manifest_entry( $index, $parsed );
+			if ( 'user' === $summary['t'] ) {
+				$preflight['authors'][] = $this->payload_to_author_summary( $parsed );
+			}
+			$manifest[] = $summary;
+			if ( is_callable( $entity_callback ) ) {
+				$callback_result = call_user_func( $entity_callback, $summary, $parsed );
+				if ( is_wp_error( $callback_result ) ) {
+					$reader->close();
+					return $callback_result;
+				}
+			} else {
+				$payloads[ $index ] = $parsed;
+			}
+			$this->increment_counts( $preflight['counts'], $parsed );
+			++$index;
+			$skip_depth = $reader->depth;
 		}
 
 		$reader->close();
 
-		return new WP_Error(
-			'better_importer.parse.entity_not_found',
-			__( 'The requested entity could not be found in the export file.', 'better-wordpress-importer' )
+		if ( version_compare( $wxr_version, Better_Preflight::MAX_WXR_VERSION, '>' ) ) {
+			return new WP_Error(
+				'better_importer.parse.unsupported_version',
+				sprintf(
+					/* translators: 1: WXR version, 2: supported version */
+					__( 'This WXR file (version %1$s) is newer than the importer supports (version %2$s).', 'better-wordpress-importer' ),
+					$wxr_version,
+					Better_Preflight::MAX_WXR_VERSION
+				)
+			);
+		}
+
+		$preflight['manifest_entity_total'] = count( $manifest );
+
+		return array(
+			'manifest'  => $manifest,
+			'preflight' => $preflight,
+			'payloads'  => $payloads,
 		);
 	}
 
@@ -477,6 +564,93 @@ class Better_WXR_Parser {
 		$term['name'] = $node->textContent;
 
 		return $term;
+	}
+
+	/**
+	 * Build the compact manifest entry for a parsed payload.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @param int                  $index   Zero-based entity index.
+	 * @param array<string, mixed> $payload Parsed entity payload.
+	 *
+	 * @return array<string, string|int>
+	 */
+	protected function payload_to_manifest_entry( $index, array $payload ) {
+		$kind = isset( $payload['entity_kind'] ) ? $payload['entity_kind'] : 'post';
+		$data = isset( $payload['data'] ) && is_array( $payload['data'] ) ? $payload['data'] : array();
+
+		if ( 'user' === $kind ) {
+			return array(
+				'i'     => $index,
+				't'     => 'user',
+				'id'    => isset( $data['ID'] ) ? (string) $data['ID'] : '',
+				'title' => isset( $data['user_login'] ) ? (string) $data['user_login'] : '',
+			);
+		}
+
+		if ( 'term' === $kind ) {
+			return array(
+				'i'     => $index,
+				't'     => 'term',
+				'id'    => isset( $data['id'] ) ? (string) $data['id'] : '',
+				'title' => isset( $data['name'] ) ? (string) $data['name'] : '',
+			);
+		}
+
+		return array(
+			'i'     => $index,
+			't'     => ( 'attachment' === $kind ) ? 'attachment' : 'post',
+			'id'    => isset( $data['post_id'] ) ? (string) $data['post_id'] : '',
+			'title' => isset( $data['post_title'] ) ? (string) $data['post_title'] : '',
+		);
+	}
+
+	/**
+	 * Build a source author summary for import options.
+	 *
+	 * @since 1.5.0
+	 *
+	 * @param array<string, mixed> $payload Parsed user payload.
+	 *
+	 * @return array<string, string>
+	 */
+	protected function payload_to_author_summary( array $payload ) {
+		$data = isset( $payload['data'] ) && is_array( $payload['data'] ) ? $payload['data'] : array();
+
+		return array(
+			'id'           => isset( $data['ID'] ) ? (string) $data['ID'] : '',
+			'title'        => isset( $data['user_login'] ) ? (string) $data['user_login'] : '',
+			'login'        => isset( $data['user_login'] ) ? (string) $data['user_login'] : '',
+			'email'        => isset( $data['user_email'] ) ? (string) $data['user_email'] : '',
+			'display_name' => isset( $data['display_name'] ) ? (string) $data['display_name'] : '',
+		);
+	}
+
+	/**
+	 * Increment preflight counters for one parsed payload.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @param array<string, int>    $counts  Counter map.
+	 * @param array<string, mixed>  $payload Parsed entity payload.
+	 *
+	 * @return void
+	 */
+	protected function increment_counts( array &$counts, array $payload ) {
+		$kind = isset( $payload['entity_kind'] ) ? $payload['entity_kind'] : 'post';
+
+		if ( 'user' === $kind ) {
+			++$counts['users'];
+		} elseif ( 'term' === $kind ) {
+			++$counts['terms'];
+		} elseif ( 'attachment' === $kind ) {
+			++$counts['attachments'];
+		} else {
+			++$counts['posts'];
+		}
+
+		$counts['comments'] += count( $payload['comments'] ?? array() );
 	}
 
 	/**

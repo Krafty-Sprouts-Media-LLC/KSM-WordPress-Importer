@@ -56,7 +56,7 @@ CREATE TABLE {$wpdb->prefix}better_import_jobs (
 - `started_at` / `completed_at` for elapsed time calculation
 - All per-type counters have `scanned`, `imported`, `skipped` variants
 
-### 1.2 `better_import_queue` — one row per entity, payload persisted on first access
+### 1.2 `better_import_queue` — one row per entity, payload persisted during queueing
 
 ```sql
 CREATE TABLE {$wpdb->prefix}better_import_queue (
@@ -84,9 +84,9 @@ CREATE TABLE {$wpdb->prefix}better_import_queue (
 ) {$charset_collate};
 ```
 
-**`parsed_payload`** is the critical column. It stores the full entity data (post fields, meta, comments, terms) as gzipped serialized PHP. Populated on first access to an entity, kept until the entity reaches `step=complete`, then deleted to reclaim space.
+**`parsed_payload`** is the critical column. It stores the full entity data (post fields, meta, comments, terms) as gzipped serialized PHP. It is populated while queue rows are created, before processing begins, and deleted when the entity reaches `step=complete` to reclaim space.
 
-For a post with 200 meta rows: gzipped payload is typically 5-30KB. Only the CURRENT in-progress entity retains its payload. Completed entities delete theirs.
+For a post with 200 meta rows: gzipped payload is typically 5-30KB. Payloads are durable queue state until each entity reaches a terminal status, then completed entities delete theirs.
 
 ### 1.3 `better_import_log` — structured log (optional, created on first use)
 
@@ -126,9 +126,9 @@ The preflight scan uses `XMLReader` in streaming mode (no `expand()`) to discove
 
 The manifest is stored in `better_import_jobs.item_manifest` (LONGTEXT, always stored, no cap). ~900KB for 11,673 entities in minimal format.
 
-### 2.2 Queue population from manifest
+### 2.2 Queue population from one streaming parse
 
-After preflight, each manifest entry gets a row in `better_import_queue`:
+During job creation, the WXR parser streams forward once. For each entity it builds the compact manifest entry, parses the normalized payload, and inserts a queue row with `parsed_payload` already populated:
 
 ```php
 foreach ( $manifest as $entry ) {
@@ -140,45 +140,24 @@ foreach ( $manifest as $entry ) {
         'title'         => $entry['title'],
         'status'        => 'pending',
         'step'          => 'create',       // all entities start at 'create'
-        'parsed_payload' => null,           // populated on first processing
+        'parsed_payload' => gzcompress( serialize( $payload ), 5 ),
+        'payload_hash'   => hash( 'sha256', serialize( $payload ) ),
     ) );
 }
 ```
 
-At this point, the XML file is no longer needed for metadata. The queue IS the work plan.
+At this point, the XML file is no longer needed for import processing. The queue IS the work plan.
 
-### 2.3 Entity parsing happens ONCE, payload stored in queue
+### 2.3 Entity parsing happens ONCE, while queue rows are seeded
 
-When a queue item reaches `IN_PROGRESS` status for the first time, the entity is parsed from the XML:
+The parser never seeks by byte offset and never advances by entity index. It streams the document once and calls the queue seeder for each parsed entity:
 
 ```php
-function parse_entity_into_payload( $queue_item, $job ) {
-    if ( $queue_item->parsed_payload ) {
-        return; // Already parsed — this is a resume
-    }
-
-    // Open XML, scan to entity by counting element opens
-    $reader = new XMLReader();
-    $reader->open( $job->file_path );
-
-    $current = 0;
-    while ( $current < $queue_item->entity_index && $reader->read() ) {
-        if ( $reader->nodeType === XMLReader::ELEMENT
-            && in_array( $reader->name, [ 'wp:author', 'wp:category', 'wp:tag', 'wp:term', 'item' ] ) ) {
-            $current++;
-        }
-    }
-
-    // We're at the target entity — parse it
-    $node   = $reader->expand();
-    $parsed = $this->parse_entity_node( $node, $queue_item->entity_type );
-
-    // Store as gzipped serialized PHP in the queue row
-    $queue_item->parsed_payload = gzcompress( serialize( $parsed ), 5 );
-    $queue_item->step_total     = count( $parsed['meta'] ?? [] );   // for meta chunking
-    $queue_item->step_total     += count( $parsed['comments'] ?? [] ); // for comment chunking
-    $this->queue_repo->save( $queue_item );
-}
+$parser->parse_file( $path, function( $manifest_entry, $payload ) use ( $queue_repo, $job ) {
+    $queue_repo->seed_from_manifest( $job->id, array( $manifest_entry ), array(
+        $manifest_entry['i'] => $payload,
+    ) );
+} );
 ```
 
 **Key:** The expensive part is `expand()` + `parse_entity_node()` — this runs ONCE per entity. All sub-steps (create post, import meta chunks, import comments, assign terms) read from `$queue_item->parsed_payload` — a gzipped blob in the database. No more XML.
@@ -186,8 +165,8 @@ function parse_entity_into_payload( $queue_item, $job ) {
 ### 2.4 Payload lifecycle
 
 ```
-PENDING (no payload)
-  → first batch: parse XML → store payload → step = 'create'
+PENDING (payload already stored)
+  → first batch: read payload → step = 'create'
   → create entity → step = 'import_meta', step_cursor = 0
   → import meta chunk 0-24 → step_cursor = 25
   → import meta chunk 25-49 → step_cursor = 50
@@ -198,15 +177,15 @@ PENDING (no payload)
   → DELETE parsed_payload (free space)
 ```
 
-Only the CURRENT in-progress entity has a `parsed_payload`. At most one entity per job. Payload size for a post with 200 meta rows: typically 5-30KB gzipped. Trivial.
+Each pending or in-progress entity has a `parsed_payload`. The payload is cleared as soon as that entity reaches `complete`, `skipped`, or terminal `failed`.
 
 ### 2.5 Resume is payload-aware
 
 On resume (next cron/batch):
 1. Query for next `status='pending'` OR `status='in_progress'` queue item
-2. If `status='pending'` → parse XML → store payload → process
+2. If `status='pending'` → read `parsed_payload` → process
 3. If `status='in_progress'` AND `parsed_payload IS NOT NULL` → read payload → continue from `step` + `step_cursor`
-4. If `status='in_progress'` AND `parsed_payload IS NULL` → parse XML → store payload → continue
+4. If `status='in_progress'` AND `parsed_payload IS NULL` → mark the row failed with a missing-payload error
 
 No transient cache. No re-parsing the same entity. The payload lives in the database until the entity is done.
 

@@ -167,6 +167,7 @@ class Better_Import_Ajax {
 			'fetch_attachments' => ! empty( $_POST['fetch_attachments'] ),
 			'default_author'    => isset( $_POST['default_author'] ) ? absint( $_POST['default_author'] ) : get_current_user_id(),
 			'job_label'         => isset( $_POST['job_label'] ) ? sanitize_text_field( wp_unslash( $_POST['job_label'] ) ) : '',
+			'user_id_map'       => self::sanitize_user_mapping(),
 		);
 
 		$job = Better_Import_Job::create( $file['attachment_id'], $file['path'], $options );
@@ -210,7 +211,7 @@ class Better_Import_Ajax {
 
 		$job = ( new Better_Import_Job_Repository() )->get( $job->id );
 		$payload = is_array( $result ) ? $result : array();
-		$payload['status'] = $job ? $job->to_status_array() : array();
+		$payload['status'] = $job ? $job->to_status_array( self::get_log_after_id() ) : array();
 
 		wp_send_json_success( $payload );
 	}
@@ -230,7 +231,7 @@ class Better_Import_Ajax {
 			wp_send_json_error( array( 'message' => $job->get_error_message() ), 403 );
 		}
 
-		wp_send_json_success( $job->to_status_array() );
+		wp_send_json_success( $job->to_status_array( self::get_log_after_id() ) );
 	}
 
 	/**
@@ -255,7 +256,7 @@ class Better_Import_Ajax {
 		$logger = new Better_Logger( $job->id );
 		$logger->info( __( 'Import paused.', 'better-wordpress-importer' ) );
 
-		wp_send_json_success( $job->to_status_array() );
+		wp_send_json_success( $job->to_status_array( self::get_log_after_id() ) );
 	}
 
 	/**
@@ -279,7 +280,7 @@ class Better_Import_Ajax {
 		$logger = new Better_Logger( $job->id );
 		$logger->info( __( 'Import resumed.', 'better-wordpress-importer' ) );
 
-		wp_send_json_success( $job->to_status_array() );
+		wp_send_json_success( $job->to_status_array( self::get_log_after_id() ) );
 	}
 
 	/**
@@ -304,7 +305,18 @@ class Better_Import_Ajax {
 		$logger = new Better_Logger( $job->id );
 		$logger->info( __( 'Import cancelled.', 'better-wordpress-importer' ) );
 
-		wp_send_json_success( $job->to_status_array() );
+		wp_send_json_success( $job->to_status_array( self::get_log_after_id() ) );
+	}
+
+	/**
+	 * Read the log cursor from an AJAX request.
+	 *
+	 * @since 1.5.0
+	 *
+	 * @return int
+	 */
+	protected static function get_log_after_id() {
+		return isset( $_REQUEST['log_after_id'] ) ? absint( $_REQUEST['log_after_id'] ) : 0;
 	}
 
 	/**
@@ -318,6 +330,35 @@ class Better_Import_Ajax {
 		if ( ! current_user_can( 'import' ) ) {
 			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'better-wordpress-importer' ) ), 403 );
 		}
+	}
+
+	/**
+	 * Sanitize source-author to destination-user mappings.
+	 *
+	 * @since 1.5.0
+	 *
+	 * @return array<string, int>
+	 */
+	protected static function sanitize_user_mapping() {
+		if ( empty( $_POST['user_mapping'] ) || ! is_array( $_POST['user_mapping'] ) ) {
+			return array();
+		}
+
+		$mapping = array();
+		$raw     = wp_unslash( $_POST['user_mapping'] );
+
+		foreach ( $raw as $source_key => $user_id ) {
+			$source_key = sanitize_text_field( (string) $source_key );
+			$user_id    = absint( $user_id );
+
+			if ( '' === $source_key || $user_id <= 0 || ! get_user_by( 'ID', $user_id ) ) {
+				continue;
+			}
+
+			$mapping[ $source_key ] = $user_id;
+		}
+
+		return $mapping;
 	}
 
 	/**

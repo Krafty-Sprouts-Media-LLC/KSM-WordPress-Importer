@@ -47,10 +47,11 @@ class Better_Import_Queue_Repository {
 	 *
 	 * @param int   $job_id   Import job ID.
 	 * @param array $manifest Compact manifest entries.
+	 * @param array $payloads Parsed payloads keyed by manifest index.
 	 *
 	 * @return true|WP_Error
 	 */
-	public function seed_from_manifest( $job_id, array $manifest ) {
+	public function seed_from_manifest( $job_id, array $manifest, array $payloads = array() ) {
 		global $wpdb;
 
 		$job_id = absint( $job_id );
@@ -66,14 +67,26 @@ class Better_Import_Queue_Repository {
 		$batch = array();
 
 		foreach ( $manifest as $entry ) {
+			$entity_index = isset( $entry['i'] ) ? (int) $entry['i'] : 0;
+			$payload_data = isset( $payloads[ $entity_index ] ) && is_array( $payloads[ $entity_index ] ) ? $payloads[ $entity_index ] : array();
+			$payload      = $this->encode_payload( $payload_data );
+			$step_total   = 0;
+
+			if ( ! empty( $payload_data ) ) {
+				$step_total = count( $payload_data['meta'] ?? array() ) + count( $payload_data['comments'] ?? array() );
+			}
+
 			$batch[] = array(
 				'job_id'        => $job_id,
-				'entity_index'  => isset( $entry['i'] ) ? (int) $entry['i'] : 0,
+				'entity_index'  => $entity_index,
 				'entity_type'   => isset( $entry['t'] ) ? sanitize_key( $entry['t'] ) : '',
 				'old_entity_id' => isset( $entry['id'] ) ? sanitize_text_field( (string) $entry['id'] ) : '',
 				'title'         => isset( $entry['title'] ) ? sanitize_text_field( (string) $entry['title'] ) : '',
 				'status'        => 'pending',
 				'step'          => 'create',
+				'step_total'    => $step_total,
+				'parsed_payload' => $payload['parsed_payload'],
+				'payload_hash'  => $payload['payload_hash'],
 				'created_at'    => $now,
 				'updated_at'    => $now,
 			);
@@ -95,6 +108,31 @@ class Better_Import_Queue_Repository {
 		}
 
 		return true;
+	}
+
+	/**
+	 * Encode a parsed payload for queue storage.
+	 *
+	 * @since 1.1.0
+	 *
+	 * @param array<string, mixed> $payload Parsed entity payload.
+	 *
+	 * @return array<string, string|null>
+	 */
+	protected function encode_payload( array $payload ) {
+		if ( empty( $payload ) ) {
+			return array(
+				'parsed_payload' => null,
+				'payload_hash'   => '',
+			);
+		}
+
+		$serialized = serialize( $payload );
+
+		return array(
+			'parsed_payload' => gzcompress( $serialized, 5 ),
+			'payload_hash'   => hash( 'sha256', $serialized ),
+		);
 	}
 
 	/**
@@ -137,7 +175,7 @@ class Better_Import_Queue_Repository {
 		$values       = array();
 
 		foreach ( $rows as $row ) {
-			$placeholders[] = '(%d, %d, %s, %s, %s, %s, %s, %s, %s)';
+			$placeholders[] = '(%d, %d, %s, %s, %s, %s, %s, %d, %s, %s, %s, %s)';
 			$values[]       = $row['job_id'];
 			$values[]       = $row['entity_index'];
 			$values[]       = $row['entity_type'];
@@ -145,12 +183,15 @@ class Better_Import_Queue_Repository {
 			$values[]       = $row['title'];
 			$values[]       = $row['status'];
 			$values[]       = $row['step'];
+			$values[]       = $row['step_total'];
+			$values[]       = $row['parsed_payload'];
+			$values[]       = $row['payload_hash'];
 			$values[]       = $row['created_at'];
 			$values[]       = $row['updated_at'];
 		}
 
 		$sql = "INSERT INTO {$this->table}
-			(job_id, entity_index, entity_type, old_entity_id, title, status, step, created_at, updated_at)
+			(job_id, entity_index, entity_type, old_entity_id, title, status, step, step_total, parsed_payload, payload_hash, created_at, updated_at)
 			VALUES " . implode( ', ', $placeholders );
 
 		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- placeholders built above.
@@ -285,6 +326,39 @@ class Better_Import_Queue_Repository {
 				sanitize_key( $status )
 			)
 		);
+	}
+
+	/**
+	 * Bulk-skip queued attachment rows for jobs that do not fetch media.
+	 *
+	 * @since 1.5.0
+	 *
+	 * @param int $job_id Import job ID.
+	 *
+	 * @return int Number of rows skipped.
+	 */
+	public function skip_pending_attachments( $job_id ) {
+		global $wpdb;
+
+		$now = current_time( 'mysql', true );
+
+		$result = $wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$this->table}
+				SET status = 'skipped',
+					step = 'complete',
+					parsed_payload = NULL,
+					payload_hash = '',
+					updated_at = %s
+				WHERE job_id = %d
+					AND entity_type = 'attachment'
+					AND status IN ('pending', 'in_progress')",
+				$now,
+				absint( $job_id )
+			)
+		);
+
+		return false === $result ? 0 : (int) $result;
 	}
 
 	/**

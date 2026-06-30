@@ -150,7 +150,8 @@ while ( $timer->has_time_remaining() ) {
 
 Important behavior:
 
-- `ensure_payload()` parses XML only when `parsed_payload` is missing.
+- Job creation parses XML once and stores `parsed_payload` before a queue row is processed.
+- `ensure_payload()` validates that the queue row has its persisted payload; missing payload is an explicit failure, not a reason to reopen XML.
 - Sub-steps read from `parsed_payload`, not from XML.
 - Meta imports are chunked and idempotent.
 - A PHP crash after post creation resumes from the saved step and cursor.

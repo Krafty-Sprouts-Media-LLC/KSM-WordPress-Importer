@@ -29,8 +29,8 @@ class Better_CLI_Command extends WP_CLI_Command {
 	 * [--batch-seconds=<n>]
 	 * : Wall-clock seconds per batch. Default: 25.
 	 *
-	 * [--no-attachments]
-	 * : Skip attachment download.
+	 * [--attachments]
+	 * : Fetch attachment files. Use --no-attachments to skip attachment downloads.
 	 *
 	 * [--dry-run]
 	 * : Validate XML and report counts without importing.
@@ -76,7 +76,7 @@ class Better_CLI_Command extends WP_CLI_Command {
 		}
 
 		$options = array(
-			'fetch_attachments' => empty( $assoc_args['no-attachments'] ),
+			'fetch_attachments' => ! array_key_exists( 'attachments', $assoc_args ) || false !== $assoc_args['attachments'],
 		);
 
 		if ( isset( $assoc_args['default-author'] ) ) {

@@ -137,7 +137,7 @@ class Better_Logger {
 
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT level, message, entity_index, created_at
+				"SELECT id, level, message, entity_index, created_at
 				FROM {$this->table}
 				WHERE job_id = %d
 				ORDER BY id DESC
@@ -153,5 +153,67 @@ class Better_Logger {
 		}
 
 		return array_reverse( $rows );
+	}
+
+	/**
+	 * Fetch log lines after a known cursor.
+	 *
+	 * @since 1.5.0
+	 *
+	 * @param int $after_id Last log ID already seen by the caller.
+	 * @param int $limit    Maximum rows.
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function get_after( $after_id = 0, $limit = 50 ) {
+		global $wpdb;
+
+		if ( $this->job_id <= 0 ) {
+			return array();
+		}
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT id, level, message, entity_index, created_at
+				FROM {$this->table}
+				WHERE job_id = %d AND id > %d
+				ORDER BY id ASC
+				LIMIT %d",
+				$this->job_id,
+				absint( $after_id ),
+				absint( $limit )
+			),
+			ARRAY_A
+		);
+
+		return empty( $rows ) ? array() : $rows;
+	}
+
+	/**
+	 * Fetch all log lines for a job in chronological order.
+	 *
+	 * @since 1.5.0
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function get_all() {
+		global $wpdb;
+
+		if ( $this->job_id <= 0 ) {
+			return array();
+		}
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT id, level, message, entity_index, created_at
+				FROM {$this->table}
+				WHERE job_id = %d
+				ORDER BY id ASC",
+				$this->job_id
+			),
+			ARRAY_A
+		);
+
+		return empty( $rows ) ? array() : $rows;
 	}
 }

@@ -161,15 +161,13 @@
 		$( '#better-importer-start-form' ).on( 'submit', function ( event ) {
 			event.preventDefault();
 			var $btn = $( '#better-importer-start-btn' ).prop( 'disabled', true );
-			$.post( betterImporterStart.ajaxUrl, {
-				action: 'better-import-start',
-				nonce: betterImporterStart.nonce,
-				attachment_id: $( '[name="attachment_id"]' ).val(),
-				local_file: $( '[name="local_file"]' ).val(),
-				default_author: $( '[name="default_author"]' ).val(),
-				fetch_attachments: $( '[name="fetch_attachments"]' ).is( ':checked' ) ? 1 : 0,
-				job_label: $( '[name="job_label"]' ).val()
-			} ).done( function ( response ) {
+			var data = $( this ).serializeArray();
+
+			data.push( { name: 'action', value: 'better-import-start' } );
+			data.push( { name: 'nonce', value: betterImporterStart.nonce } );
+			data.push( { name: 'fetch_attachments', value: $( '[name="fetch_attachments"]' ).is( ':checked' ) ? 1 : 0 } );
+
+			$.post( betterImporterStart.ajaxUrl, data ).done( function ( response ) {
 				if ( ! response.success ) {
 					window.alert( response.data && response.data.message ? response.data.message : 'Import failed.' );
 					$btn.prop( 'disabled', false );

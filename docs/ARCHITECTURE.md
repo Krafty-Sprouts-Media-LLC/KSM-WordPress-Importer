@@ -200,7 +200,7 @@ If a queue item has parsed_payload:
   Resume directly from that payload.
 
 If a queue item is missing parsed_payload:
-  Parse that entity from XML once, store parsed_payload, then continue from payload.
+  Mark it failed with a missing-payload error. Do not reopen XML during batch processing.
 ```
 
 ### 5.3 Time-based batch processing
@@ -233,7 +233,7 @@ For post entities specifically, break processing into independent steps that eac
 process_one_entity(entity):
   switch entity.step:
     case 'parse_and_create':
-      parse XML → wp_insert_post → store new_id → step = 'import_meta'
+      read parsed_payload → wp_insert_post → store new_id → step = 'import_meta'
       save checkpoint
       
     case 'import_meta':

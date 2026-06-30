@@ -80,3 +80,17 @@
 .better-importer-log li {
 	margin-bottom: 6px;
 }
+
+.better-importer-log-entry strong {
+	display: inline-block;
+	min-width: 52px;
+	text-transform: uppercase;
+}
+
+.better-importer-log-entry-warning strong {
+	color: #996800;
+}
+
+.better-importer-log-entry-error strong {
+	color: #b32d2e;
+}

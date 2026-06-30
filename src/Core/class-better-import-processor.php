@@ -53,14 +53,6 @@ class Better_Import_Processor {
 	protected $queue_repo;
 
 	/**
-	 * WXR parser.
-	 *
-	 * @since 1.1.0
-	 * @var Better_WXR_Parser
-	 */
-	protected $parser;
-
-	/**
 	 * Entity importer.
 	 *
 	 * @since 1.1.0
@@ -76,7 +68,6 @@ class Better_Import_Processor {
 	public function __construct() {
 		$this->job_repo   = new Better_Import_Job_Repository();
 		$this->queue_repo = new Better_Import_Queue_Repository();
-		$this->parser     = new Better_WXR_Parser();
 	}
 
 	/**
@@ -154,6 +145,20 @@ class Better_Import_Processor {
 			$logger->info( __( 'Import processing started.', 'better-wordpress-importer' ) );
 		}
 
+		if ( ! $job->get_option( 'fetch_attachments', false ) ) {
+			$bulk_skipped = $this->queue_repo->skip_pending_attachments( $job->id );
+			if ( $bulk_skipped > 0 ) {
+				$skipped += $bulk_skipped;
+				$logger->info(
+					sprintf(
+						/* translators: %d: attachment count */
+						__( 'Skipped %d media items because attachment import is disabled.', 'better-wordpress-importer' ),
+						$bulk_skipped
+					)
+				);
+			}
+		}
+
 		while ( ( microtime( true ) - $batch_start ) < $max_seconds ) {
 			$job = $this->job_repo->get( $job->id );
 			if ( ! $job || 'paused' === $job->status ) {
@@ -185,6 +190,8 @@ class Better_Import_Processor {
 		do_action( 'better_importer.job.completed', $job );
 		do_action( 'import_end' );
 
+		$logger->info( __( 'Import processing completed.', 'better-wordpress-importer' ) );
+
 		return array(
 					'job_id'      => $job->id,
 					'status'      => $job->status,
@@ -193,13 +200,6 @@ class Better_Import_Processor {
 					'failed'      => $failed,
 					'is_complete' => true,
 				);
-			}
-
-			if ( 'attachment' === $item->entity_type && ! $job->get_option( 'fetch_attachments', false ) ) {
-				$item->status = 'skipped';
-				$this->queue_repo->save( $item );
-				++$skipped;
-				continue;
 			}
 
 			$entity_start = microtime( true );
@@ -252,6 +252,19 @@ class Better_Import_Processor {
 		$job->mapping_state = $remapper->to_array();
 		$this->job_repo->sync_counters_from_queue( $job );
 		$this->job_repo->save( $job );
+
+		if ( $processed > 0 || $skipped > 0 || $failed > 0 ) {
+			$logger->info(
+				sprintf(
+					/* translators: 1: completed items, 2: skipped items, 3: failed items */
+					__( 'Batch finished: %1$d completed, %2$d skipped, %3$d failed.', 'better-wordpress-importer' ),
+					$processed,
+					$skipped,
+					$failed
+				)
+			);
+		}
+
 		$this->release_lock( $job->id );
 
 		return array(
@@ -265,7 +278,7 @@ class Better_Import_Processor {
 	}
 
 	/**
-	 * Parse XML into the queue payload when needed.
+	 * Verify the queue item has its persisted parsed payload.
 	 *
 	 * @since 1.1.0
 	 *
@@ -280,23 +293,14 @@ class Better_Import_Processor {
 			return true;
 		}
 
-		$parsed = $this->parser->parse_entity_at_index( $job->file_path, $item->entity_index );
-		if ( is_wp_error( $parsed ) ) {
-			$logger->error( $parsed->get_error_message(), $item->entity_index );
-			return $parsed;
-		}
+		$error = new WP_Error(
+			'better_importer.payload.missing',
+			__( 'Parsed entity payload is missing from the queue row. Recreate the import job so the file is parsed once into persistent queue payloads.', 'better-wordpress-importer' )
+		);
 
-		$item->set_encoded_payload( $parsed );
+		$logger->error( $error->get_error_message(), $item->entity_index );
 
-		$meta_count     = count( $parsed['meta'] ?? array() );
-		$comment_count  = count( $parsed['comments'] ?? array() );
-		$item->step     = 'create';
-		$item->step_cursor = 0;
-		$item->step_total  = $meta_count + $comment_count;
-
-		$this->queue_repo->save( $item );
-
-		return true;
+		return $error;
 	}
 
 	/**
@@ -313,6 +317,22 @@ class Better_Import_Processor {
 	 * @return array<string, string>
 	 */
 	protected function process_next_step( Better_Import_Job $job, Better_Import_Queue_Item $item, array $payload, Better_Import_Remapper $remapper, Better_Logger $logger ) {
+		if ( ! in_array( $item->entity_type, array( 'user', 'term' ), true ) ) {
+			$missing_taxonomies = $this->importer->get_missing_term_taxonomies( isset( $payload['terms'] ) ? $payload['terms'] : array() );
+			if ( ! empty( $missing_taxonomies ) ) {
+				$message = sprintf(
+					/* translators: %s: comma-separated taxonomy slugs */
+					__( 'Cannot import this post because these taxonomies are not registered on this site: %s. Install/activate the plugin or theme that registers them, then retry this item.', 'better-wordpress-importer' ),
+					implode( ', ', $missing_taxonomies )
+				);
+
+				$this->mark_item_failed( $item, 'better_importer_taxonomy_missing', $message );
+				$logger->error( $message, $item->entity_index );
+
+				return array( 'status' => 'failed' );
+			}
+		}
+
 		switch ( $item->step ) {
 			case 'create':
 				return $this->step_create_entity( $job, $item, $payload, $remapper, $logger );
@@ -321,7 +341,7 @@ class Better_Import_Processor {
 			case 'import_comments':
 				return $this->step_import_comments_chunk( $job, $item, $payload, $remapper );
 			case 'assign_terms':
-				return $this->step_assign_terms( $job, $item, $payload );
+				return $this->step_assign_terms( $job, $item, $payload, $logger );
 			case 'complete':
 				return $this->finalize_item( $item );
 		}
@@ -352,9 +372,14 @@ class Better_Import_Processor {
 		}
 
 		if ( 'failed' === $result['status'] ) {
-			$this->mark_item_failed( $item, 'better_importer.create.failed', $result['error'] );
+			$code = isset( $result['code'] ) ? $result['code'] : 'better_importer.create.failed';
+			$this->mark_item_failed( $item, $code, $result['error'] );
 			$logger->error( $result['error'], $item->entity_index );
 			return array( 'status' => 'failed' );
+		}
+
+		if ( ! empty( $result['message'] ) && 'post' !== $item->entity_type ) {
+			$logger->info( $result['message'], $item->entity_index );
 		}
 
 		if ( ! empty( $result['new_entity_id'] ) ) {
@@ -475,11 +500,19 @@ class Better_Import_Processor {
 	 * @param Better_Import_Job        $job     Import job.
 	 * @param Better_Import_Queue_Item $item    Queue item.
 	 * @param array<string, mixed>     $payload Parsed payload.
+	 * @param Better_Logger            $logger  Logger.
 	 *
 	 * @return array<string, string>
 	 */
-	protected function step_assign_terms( Better_Import_Job $job, Better_Import_Queue_Item $item, array $payload ) {
-		$this->importer->assign_terms( $item->new_entity_id, isset( $payload['terms'] ) ? $payload['terms'] : array() );
+	protected function step_assign_terms( Better_Import_Job $job, Better_Import_Queue_Item $item, array $payload, Better_Logger $logger ) {
+		$result = $this->importer->assign_terms( $item->new_entity_id, isset( $payload['terms'] ) ? $payload['terms'] : array() );
+
+		if ( is_wp_error( $result ) ) {
+			$this->mark_item_failed( $item, $result->get_error_code(), $result->get_error_message() );
+			$logger->error( $result->get_error_message(), $item->entity_index );
+			return array( 'status' => 'failed' );
+		}
+
 		$item->step = 'complete';
 		return $this->finalize_item( $item );
 	}
@@ -532,7 +565,7 @@ class Better_Import_Processor {
 	 */
 	protected function mark_item_failed( Better_Import_Queue_Item $item, $code, $message ) {
 		$item->status        = 'failed';
-		$item->error_code    = sanitize_key( $code );
+		$item->error_code    = sanitize_key( str_replace( '.', '_', $code ) );
 		$item->error_message = $message;
 		$item->last_error_at = current_time( 'mysql', true );
 		$item->attempts     += 1;
