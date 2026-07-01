@@ -238,6 +238,48 @@ class Better_Import_Queue_Repository {
 	}
 
 	/**
+	 * Resolve the local ID for a source entity via its queue row.
+	 *
+	 * The queue table already records `old_entity_id -> new_entity_id` for
+	 * every post, attachment, user, and term. Reading it back through the
+	 * `job_type_old` index lets the remapper resolve IDs across batches
+	 * without carrying the full mapping in the job row.
+	 *
+	 * @since 1.6.0
+	 *
+	 * @param int               $job_id        Import job ID.
+	 * @param array<int,string> $entity_types  Queue entity types to match.
+	 * @param string|int        $old_entity_id Source entity ID.
+	 *
+	 * @return int|null Local ID, or null when unresolved.
+	 */
+	public function get_new_entity_id( $job_id, array $entity_types, $old_entity_id ) {
+		global $wpdb;
+
+		$old_entity_id = (string) $old_entity_id;
+		if ( empty( $entity_types ) || '' === $old_entity_id ) {
+			return null;
+		}
+
+		$types        = array_map( 'sanitize_key', $entity_types );
+		$placeholders = implode( ', ', array_fill( 0, count( $types ), '%s' ) );
+		$params       = array_merge( array( absint( $job_id ) ), $types, array( $old_entity_id ) );
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- placeholders built above.
+		$value = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT new_entity_id FROM {$this->table}
+				WHERE job_id = %d AND entity_type IN ({$placeholders}) AND old_entity_id = %s
+					AND new_entity_id IS NOT NULL
+				LIMIT 1",
+				$params
+			)
+		);
+
+		return null === $value ? null : (int) $value;
+	}
+
+	/**
 	 * Persist a queue item row.
 	 *
 	 * @since 1.1.0

@@ -253,15 +253,39 @@ class Better_Importer {
 			);
 		}
 
+		$original_post_type = '';
 		if ( ! get_post_type_object( $data['post_type'] ) ) {
-			return array(
-				'status' => 'failed',
-				'error'  => sprintf(
-					/* translators: %s: post type slug */
-					__( 'Invalid post type: %s', 'better-wordpress-importer' ),
-					$data['post_type']
-				),
-			);
+			$strategy = $job->get_option( 'unknown_post_type_strategy', 'import_as_draft' );
+
+			if ( 'fail' === $strategy ) {
+				return array(
+					'status' => 'failed',
+					'code'   => 'better_importer.post.invalid_type',
+					'error'  => sprintf(
+						/* translators: %s: post type slug */
+						__( 'Invalid post type: %s', 'better-wordpress-importer' ),
+						$data['post_type']
+					),
+				);
+			}
+
+			if ( 'skip' === $strategy ) {
+				return array(
+					'status'  => 'skipped',
+					'message' => sprintf(
+						/* translators: 1: post title, 2: post type slug */
+						__( 'Skipped "%1$s": post type "%2$s" is not registered on this site.', 'better-wordpress-importer' ),
+						isset( $data['post_title'] ) ? $data['post_title'] : '',
+						$data['post_type']
+					),
+				);
+			}
+
+			// import_as_draft (default): keep the content under a safe type and
+			// record the source type so it can be migrated later.
+			$original_post_type  = $data['post_type'];
+			$data['post_type']   = 'post';
+			$data['post_status'] = 'draft';
 		}
 
 		$existing = $this->post_exists( $data );
@@ -282,8 +306,9 @@ class Better_Importer {
 		if ( $existing ) {
 			$post_id = $existing;
 		} else {
-			$postarr = $this->map_post_authors_and_parents( $data, $meta, $job, $remapper );
-			$post_id = wp_insert_post( wp_slash( $postarr ), true );
+			$deferred = array();
+			$postarr  = $this->map_post_authors_and_parents( $data, $deferred, $job, $remapper );
+			$post_id  = wp_insert_post( wp_slash( $postarr ), true );
 
 			if ( is_wp_error( $post_id ) ) {
 				return array(
@@ -294,6 +319,16 @@ class Better_Importer {
 
 			update_post_meta( $post_id, '_better_import_job_id', $job->id );
 			update_post_meta( $post_id, '_better_import_original_id', $original_id );
+
+			if ( '' !== $original_post_type ) {
+				update_post_meta( $post_id, '_better_import_original_post_type', $original_post_type );
+			}
+
+			// Persist deferred parent/author markers now so the remapping phase
+			// can resolve them once the whole file is imported.
+			foreach ( $deferred as $marker ) {
+				add_post_meta( $post_id, $marker['key'], $marker['value'] );
+			}
 		}
 
 		$remapper->set( 'post', $original_id, $post_id );
@@ -307,18 +342,32 @@ class Better_Importer {
 	/**
 	 * Import a chunk of post meta rows.
 	 *
+	 * In the default `bulk` mode the rows are written with a single INSERT for
+	 * speed. In `hooked` mode each row goes through `add_post_meta()` so plugin
+	 * hooks (`added_post_meta`, meta index builders) run — slower, but required
+	 * for stacks that depend on those hooks.
+	 *
 	 * @since 1.1.0
 	 *
-	 * @param int                    $post_id Post ID.
-	 * @param array<int, array>      $meta_rows Meta rows.
-	 * @param array<string, mixed>   $post_data Post data for filters.
+	 * @param int                         $post_id    Post ID.
+	 * @param array<int, array>           $meta_rows  Meta rows.
+	 * @param array<string, mixed>        $post_data  Post data for filters.
+	 * @param string                      $write_mode `bulk` (default) or `hooked`.
+	 * @param Better_Import_Remapper|null $remapper   Remapper for value remapping.
 	 *
 	 * @return true|WP_Error
 	 */
-	public function import_meta_chunk( $post_id, array $meta_rows, array $post_data ) {
+	public function import_meta_chunk( $post_id, array $meta_rows, array $post_data, $write_mode = 'bulk', Better_Import_Remapper $remapper = null ) {
 		global $wpdb;
 
-		$rows = array();
+		if ( 'hooked' === $write_mode ) {
+			return $this->import_meta_chunk_hooked( $post_id, $meta_rows, $post_data, $remapper );
+		}
+
+		$unique_keys = $this->unique_meta_keys();
+
+		$rows        = array();
+		$unique_rows = array();
 
 		foreach ( $meta_rows as $meta_item ) {
 			if ( empty( $meta_item['key'] ) ) {
@@ -332,9 +381,22 @@ class Better_Importer {
 				continue;
 			}
 
+			if ( isset( $unique_keys[ $key ] ) ) {
+				$unique_rows[ (string) $key ] = maybe_serialize( $value );
+				continue;
+			}
+
 			$rows[] = array(
 				'key'   => (string) $key,
 				'value' => maybe_serialize( $value ),
+			);
+		}
+
+		foreach ( $unique_rows as $unique_key => $serialized_value ) {
+			delete_post_meta( $post_id, $unique_key );
+			$rows[] = array(
+				'key'   => $unique_key,
+				'value' => $serialized_value,
 			);
 		}
 
@@ -367,6 +429,85 @@ class Better_Importer {
 	}
 
 	/**
+	 * Meta keys that must hold a single value.
+	 *
+	 * These are replaced rather than appended so re-importing a post never
+	 * produces duplicate rows (e.g. multiple `_thumbnail_id` values).
+	 *
+	 * @since 1.6.0
+	 *
+	 * @return array<string, int> Keys flipped for O(1) lookup.
+	 */
+	protected function unique_meta_keys() {
+		/**
+		 * Filter the list of single-value meta keys.
+		 *
+		 * @since 1.6.0
+		 *
+		 * @param array<int, string> $keys Single-value meta keys.
+		 */
+		$keys = (array) apply_filters(
+			'better_importer.meta.unique_keys',
+			array( '_thumbnail_id', '_wp_page_template', '_edit_last', '_edit_lock', '_wp_attached_file', '_wp_attachment_metadata' )
+		);
+
+		return array_flip( $keys );
+	}
+
+	/**
+	 * Import a chunk of post meta through WordPress hooks.
+	 *
+	 * Slower than the bulk path but fires `add_post_meta` hooks and remaps the
+	 * `_edit_last` editor to the local user, matching core importer behaviour.
+	 *
+	 * @since 1.6.0
+	 *
+	 * @param int                         $post_id   Post ID.
+	 * @param array<int, array>           $meta_rows Meta rows.
+	 * @param array<string, mixed>        $post_data Post data for filters.
+	 * @param Better_Import_Remapper|null $remapper  Remapper for value remapping.
+	 *
+	 * @return true
+	 */
+	protected function import_meta_chunk_hooked( $post_id, array $meta_rows, array $post_data, Better_Import_Remapper $remapper = null ) {
+		$unique_keys = $this->unique_meta_keys();
+
+		foreach ( $meta_rows as $meta_item ) {
+			if ( empty( $meta_item['key'] ) ) {
+				continue;
+			}
+
+			$key   = $meta_item['key'];
+			$value = isset( $meta_item['value'] ) ? $meta_item['value'] : '';
+
+			if ( ! apply_filters( 'better_importer.pre_process.post_meta', true, $key, $value, $post_id, $post_data ) ) {
+				continue;
+			}
+
+			$value = maybe_unserialize( $value );
+
+			// Remap the last editor to the local user; skip when unknown.
+			if ( '_edit_last' === $key && $remapper instanceof Better_Import_Remapper ) {
+				$mapped = $remapper->get( 'user', (int) $value );
+				if ( ! $mapped ) {
+					continue;
+				}
+				$value = $mapped;
+			}
+
+			if ( isset( $unique_keys[ $key ] ) ) {
+				update_post_meta( $post_id, wp_slash( $key ), wp_slash( $value ) );
+			} else {
+				add_post_meta( $post_id, wp_slash( $key ), wp_slash( $value ) );
+			}
+		}
+
+		update_post_meta( $post_id, '_better_import_meta_cursor', time() );
+
+		return true;
+	}
+
+	/**
 	 * Import a chunk of comments for a post.
 	 *
 	 * @since 1.1.0
@@ -384,6 +525,15 @@ class Better_Importer {
 				continue;
 			}
 
+			// Remap the parent comment and author to local IDs. Parents earlier
+			// in the same post resolve immediately; forward references fall back
+			// to a top-level comment rather than pointing at a stale source ID.
+			$parent_original = isset( $comment_data['comment_parent'] ) ? (int) $comment_data['comment_parent'] : 0;
+			$parent_new      = $parent_original ? (int) $remapper->get( 'comment', $parent_original ) : 0;
+
+			$author_original = isset( $comment_data['comment_user_id'] ) ? (int) $comment_data['comment_user_id'] : 0;
+			$author_new      = $author_original ? (int) $remapper->get( 'user', $author_original ) : 0;
+
 			$commentarr = array(
 				'comment_post_ID'      => $post_id,
 				'comment_author'       => isset( $comment_data['comment_author'] ) ? $comment_data['comment_author'] : '',
@@ -395,8 +545,8 @@ class Better_Importer {
 				'comment_content'      => isset( $comment_data['comment_content'] ) ? $comment_data['comment_content'] : '',
 				'comment_approved'     => isset( $comment_data['comment_approved'] ) ? $comment_data['comment_approved'] : 1,
 				'comment_type'         => isset( $comment_data['comment_type'] ) ? $comment_data['comment_type'] : '',
-				'comment_parent'       => 0,
-				'user_id'              => isset( $comment_data['comment_user_id'] ) ? (int) $comment_data['comment_user_id'] : 0,
+				'comment_parent'       => $parent_new,
+				'user_id'              => $author_new,
 			);
 
 			$comment_id = wp_insert_comment( wp_slash( $commentarr ) );
@@ -473,18 +623,96 @@ class Better_Importer {
 	}
 
 	/**
+	 * Resolve a chunk of deferred post relationships (parent, author).
+	 *
+	 * When a post is created before its parent or author exists, the source ID
+	 * is stored as a `_better_import_parent` / `_better_import_user_slug` marker
+	 * meta. Once the whole file is imported this pass resolves those markers to
+	 * local IDs. Markers are always removed once handled — even when the target
+	 * genuinely does not exist — so the remapping phase is guaranteed to finish.
+	 *
+	 * Updates are written directly to the posts table to avoid running the full
+	 * `wp_update_post()` hook stack across thousands of rows; caches are cleared
+	 * per affected post.
+	 *
+	 * @since 1.6.0
+	 *
+	 * @param Better_Import_Job      $job        Import job.
+	 * @param Better_Import_Remapper $remapper   ID remapper.
+	 * @param int                    $chunk_size Rows to resolve per marker type.
+	 *
+	 * @return int Number of markers handled in this call.
+	 */
+	public function process_remap_chunk( Better_Import_Job $job, Better_Import_Remapper $remapper, $chunk_size = 100 ) {
+		global $wpdb;
+
+		$chunk_size = max( 1, absint( $chunk_size ) );
+		$handled    = 0;
+
+		$parent_rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT pm.post_id AS post_id, pm.meta_value AS old_value
+				FROM {$wpdb->postmeta} pm
+				INNER JOIN {$wpdb->postmeta} j
+					ON j.post_id = pm.post_id AND j.meta_key = '_better_import_job_id' AND j.meta_value = %d
+				WHERE pm.meta_key = '_better_import_parent'
+				LIMIT %d",
+				$job->id,
+				$chunk_size
+			)
+		);
+
+		foreach ( $parent_rows as $row ) {
+			$post_id    = (int) $row->post_id;
+			$new_parent = $remapper->get( 'post', $row->old_value );
+			if ( $new_parent ) {
+				$wpdb->update( $wpdb->posts, array( 'post_parent' => (int) $new_parent ), array( 'ID' => $post_id ), array( '%d' ), array( '%d' ) );
+				clean_post_cache( $post_id );
+			}
+			delete_post_meta( $post_id, '_better_import_parent' );
+			++$handled;
+		}
+
+		$author_rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT pm.post_id AS post_id, pm.meta_value AS old_value
+				FROM {$wpdb->postmeta} pm
+				INNER JOIN {$wpdb->postmeta} j
+					ON j.post_id = pm.post_id AND j.meta_key = '_better_import_job_id' AND j.meta_value = %d
+				WHERE pm.meta_key = '_better_import_user_slug'
+				LIMIT %d",
+				$job->id,
+				$chunk_size
+			)
+		);
+
+		foreach ( $author_rows as $row ) {
+			$post_id    = (int) $row->post_id;
+			$new_author = $remapper->get( 'user_slug', $row->old_value );
+			if ( $new_author ) {
+				$wpdb->update( $wpdb->posts, array( 'post_author' => (int) $new_author ), array( 'ID' => $post_id ), array( '%d' ), array( '%d' ) );
+				clean_post_cache( $post_id );
+			}
+			delete_post_meta( $post_id, '_better_import_user_slug' );
+			++$handled;
+		}
+
+		return $handled;
+	}
+
+	/**
 	 * Map post author and parent fields using remapper state.
 	 *
 	 * @since 1.1.0
 	 *
 	 * @param array<string, mixed>   $data     Post data.
-	 * @param array<int, array>      $meta     Meta rows (by reference).
+	 * @param array<int, array>      $deferred Deferred relationship markers (by reference).
 	 * @param Better_Import_Job      $job      Import job.
 	 * @param Better_Import_Remapper $remapper ID remapper.
 	 *
 	 * @return array<string, mixed>
 	 */
-	protected function map_post_authors_and_parents( array $data, array &$meta, Better_Import_Job $job, Better_Import_Remapper $remapper ) {
+	protected function map_post_authors_and_parents( array $data, array &$deferred, Better_Import_Job $job, Better_Import_Remapper $remapper ) {
 		$postarr = array(
 			'post_title'   => isset( $data['post_title'] ) ? $data['post_title'] : '',
 			'post_content' => isset( $data['post_content'] ) ? $data['post_content'] : '',
@@ -512,7 +740,7 @@ class Better_Importer {
 		if ( $parent_id && $remapper->has( 'post', $parent_id ) ) {
 			$postarr['post_parent'] = $remapper->get( 'post', $parent_id );
 		} elseif ( $parent_id ) {
-			$meta[] = array(
+			$deferred[] = array(
 				'key'   => '_better_import_parent',
 				'value' => $parent_id,
 			);
@@ -523,7 +751,7 @@ class Better_Importer {
 		if ( $author_slug && $remapper->has( 'user_slug', $author_slug ) ) {
 			$postarr['post_author'] = $remapper->get( 'user_slug', $author_slug );
 		} elseif ( $author_slug ) {
-			$meta[] = array(
+			$deferred[] = array(
 				'key'   => '_better_import_user_slug',
 				'value' => $author_slug,
 			);

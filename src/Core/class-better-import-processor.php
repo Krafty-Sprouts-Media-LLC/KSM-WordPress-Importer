@@ -37,6 +37,13 @@ class Better_Import_Processor {
 	const LOCK_TTL = 60;
 
 	/**
+	 * Deferred relationships resolved per remap chunk.
+	 *
+	 * @since 1.6.0
+	 */
+	const REMAP_CHUNK_SIZE = 100;
+
+	/**
 	 * Job repository.
 	 *
 	 * @since 1.1.0
@@ -194,28 +201,39 @@ class Better_Import_Processor {
 
 			$item = $this->queue_repo->get_next_work_item( $job->id );
 			if ( ! $item ) {
-		$job->status       = 'complete';
-		$job->phase        = 'complete';
-		$job->completed_at = current_time( 'mysql', true );
-		$job->mapping_state = $remapper->to_array();
-		$this->job_repo->sync_counters_from_queue( $job );
-		$this->job_repo->save_state( $job );
-		$restore_runtime();
-		$this->release_lock( $job->id );
+				// Queue drained: resolve deferred parent/author relationships
+				// before declaring the job complete.
+				$remapped = $this->importer->process_remap_chunk( $job, $remapper, self::REMAP_CHUNK_SIZE );
+				if ( $remapped > 0 ) {
+					if ( 'remapping' !== $job->phase ) {
+						$job->phase = 'remapping';
+						$logger->info( __( 'Resolving deferred relationships.', 'better-wordpress-importer' ) );
+					}
+					continue;
+				}
 
-		/**
-		 * Fires when an import job finishes processing all queue items.
-		 *
-		 * @since 1.1.0
-		 *
-		 * @param Better_Import_Job $job Import job.
-		 */
-		do_action( 'better_importer.job.completed', $job );
-		do_action( 'import_end' );
+				$job->status        = 'complete';
+				$job->phase         = 'complete';
+				$job->completed_at  = current_time( 'mysql', true );
+				$job->mapping_state = $remapper->to_array();
+				$this->job_repo->sync_counters_from_queue( $job );
+				$this->job_repo->save_state( $job );
+				$restore_runtime();
+				$this->release_lock( $job->id );
 
-		$logger->info( __( 'Import processing completed.', 'better-wordpress-importer' ) );
+				/**
+				 * Fires when an import job finishes processing all queue items.
+				 *
+				 * @since 1.1.0
+				 *
+				 * @param Better_Import_Job $job Import job.
+				 */
+				do_action( 'better_importer.job.completed', $job );
+				do_action( 'import_end' );
 
-		return array(
+				$logger->info( __( 'Import processing completed.', 'better-wordpress-importer' ) );
+
+				return array(
 					'job_id'      => $job->id,
 					'status'      => $job->status,
 					'processed'   => $processed,
@@ -360,7 +378,7 @@ class Better_Import_Processor {
 			case 'create':
 				return $this->step_create_entity( $job, $item, $payload, $remapper, $logger );
 			case 'import_meta':
-				return $this->step_import_meta_chunk( $job, $item, $payload );
+				return $this->step_import_meta_chunk( $job, $item, $payload, $remapper );
 			case 'import_comments':
 				return $this->step_import_comments_chunk( $job, $item, $payload, $remapper );
 			case 'assign_terms':
@@ -449,19 +467,21 @@ class Better_Import_Processor {
 	 *
 	 * @since 1.1.0
 	 *
-	 * @param Better_Import_Job        $job     Import job.
-	 * @param Better_Import_Queue_Item $item    Queue item.
-	 * @param array<string, mixed>     $payload Parsed payload.
+	 * @param Better_Import_Job        $job      Import job.
+	 * @param Better_Import_Queue_Item $item     Queue item.
+	 * @param array<string, mixed>     $payload  Parsed payload.
+	 * @param Better_Import_Remapper   $remapper ID remapper.
 	 *
 	 * @return array<string, string>
 	 */
-	protected function step_import_meta_chunk( Better_Import_Job $job, Better_Import_Queue_Item $item, array $payload ) {
+	protected function step_import_meta_chunk( Better_Import_Job $job, Better_Import_Queue_Item $item, array $payload, Better_Import_Remapper $remapper ) {
 		$chunk_size = (int) $job->get_option( 'meta_chunk_size', 200 );
+		$write_mode = (string) $job->get_option( 'meta_write_mode', 'bulk' );
 		$meta       = isset( $payload['meta'] ) ? $payload['meta'] : array();
 		$slice      = array_slice( $meta, $item->step_cursor, $chunk_size );
 		$post_data  = isset( $payload['data'] ) ? $payload['data'] : array();
 
-		$result = $this->importer->import_meta_chunk( $item->new_entity_id, $slice, $post_data );
+		$result = $this->importer->import_meta_chunk( $item->new_entity_id, $slice, $post_data, $write_mode, $remapper );
 		if ( is_wp_error( $result ) ) {
 			$this->mark_item_failed( $item, $result->get_error_code(), $result->get_error_message() );
 			return array( 'status' => 'failed' );

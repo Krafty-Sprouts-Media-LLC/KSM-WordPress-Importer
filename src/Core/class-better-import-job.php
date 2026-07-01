@@ -592,9 +592,26 @@ class Better_Import_Job {
 	 */
 	public function to_status_array( $log_after_id = 0 ) {
 		$queue_repo   = new Better_Import_Queue_Repository();
-		$queue_counts = $queue_repo->get_status_summary( $this->id );
 		$type_counts  = $queue_repo->get_type_status_summary( $this->id );
 		$active_item  = $queue_repo->get_active_item( $this->id );
+
+		// Derive the status totals from the per-type summary so polling runs a
+		// single aggregate query instead of two.
+		$queue_counts = array(
+			'pending'     => 0,
+			'in_progress' => 0,
+			'complete'    => 0,
+			'skipped'     => 0,
+			'failed'      => 0,
+		);
+		foreach ( $type_counts as $statuses ) {
+			foreach ( $statuses as $status => $count ) {
+				if ( isset( $queue_counts[ $status ] ) ) {
+					$queue_counts[ $status ] += (int) $count;
+				}
+			}
+		}
+
 		$total        = $this->manifest_entity_total();
 		$finished     = isset( $queue_counts['complete'] ) ? (int) $queue_counts['complete'] : 0;
 		$skipped      = isset( $queue_counts['skipped'] ) ? (int) $queue_counts['skipped'] : 0;
