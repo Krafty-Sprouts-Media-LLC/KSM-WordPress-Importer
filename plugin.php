@@ -3,7 +3,7 @@
  * Plugin Name: Better WordPress Importer
  * Plugin URI: https://github.com/Krafty-Sprouts-Media-LLC/KSM-WordPress-Importer
  * Description: Import posts, pages, comments, custom fields, categories, tags and more from a WordPress export file. Resumable, batch-based, large-file safe.
- * Version: 1.5.0
+ * Version: 1.6.0
  * Author: Krafty Sprouts Media, LLC
  * License: GPL v2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -18,7 +18,7 @@
 defined( 'ABSPATH' ) || exit;
 
 if ( ! defined( 'BETTER_IMPORTER_VERSION' ) ) {
-	define( 'BETTER_IMPORTER_VERSION', '1.5.0' );
+	define( 'BETTER_IMPORTER_VERSION', '1.6.0' );
 }
 
 if ( ! defined( 'BETTER_IMPORTER_PATH' ) ) {

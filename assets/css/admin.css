@@ -70,6 +70,11 @@
 	text-transform: capitalize;
 }
 
+.better-importer-count-failed {
+	color: #b32d2e;
+	font-weight: 600;
+}
+
 .better-importer-log ul {
 	max-height: 280px;
 	overflow: auto;

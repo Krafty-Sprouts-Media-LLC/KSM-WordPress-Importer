@@ -61,6 +61,14 @@ class Better_Import_Processor {
 	protected $importer;
 
 	/**
+	 * Missing taxonomy assignment counts for the active batch.
+	 *
+	 * @since 1.5.0
+	 * @var array<string, int>
+	 */
+	protected $skipped_taxonomies = array();
+
+	/**
 	 * Constructor.
 	 *
 	 * @since 1.1.0
@@ -129,6 +137,7 @@ class Better_Import_Processor {
 		$processed        = 0;
 		$skipped          = 0;
 		$failed           = 0;
+		$this->skipped_taxonomies = array();
 
 		if ( ! defined( 'WP_IMPORTING' ) ) {
 			define( 'WP_IMPORTING', true );
@@ -137,11 +146,23 @@ class Better_Import_Processor {
 		wp_raise_memory_limit( 'admin' );
 		set_time_limit( max( 30, $max_seconds + 5 ) );
 
+		$previous_cache_invalidation = wp_suspend_cache_invalidation( true );
+		$previous_term_counting      = wp_defer_term_counting();
+		$previous_comment_counting   = wp_defer_comment_counting();
+		wp_defer_term_counting( true );
+		wp_defer_comment_counting( true );
+
+		$restore_runtime = function() use ( $previous_cache_invalidation, $previous_term_counting, $previous_comment_counting ) {
+			wp_suspend_cache_invalidation( $previous_cache_invalidation );
+			wp_defer_term_counting( $previous_term_counting );
+			wp_defer_comment_counting( $previous_comment_counting );
+		};
+
 		if ( 'queued' === $job->status ) {
 			$job->status    = 'processing';
 			$job->phase     = 'importing';
 			$job->started_at = current_time( 'mysql', true );
-			$this->job_repo->save( $job );
+			$this->job_repo->save_state( $job );
 			$logger->info( __( 'Import processing started.', 'better-wordpress-importer' ) );
 		}
 
@@ -160,12 +181,13 @@ class Better_Import_Processor {
 		}
 
 		while ( ( microtime( true ) - $batch_start ) < $max_seconds ) {
-			$job = $this->job_repo->get( $job->id );
-			if ( ! $job || 'paused' === $job->status ) {
-				$this->release_lock( $job ? $job->id : $job_id );
+			$current_status = $this->job_repo->get_status( $job->id );
+			if ( null === $current_status || 'paused' === $current_status ) {
+				$restore_runtime();
+				$this->release_lock( $job->id );
 				return array(
-					'job_id'  => $job_id,
-					'status'  => $job ? $job->status : 'paused',
+					'job_id'  => $job->id,
+					'status'  => null === $current_status ? 'paused' : $current_status,
 					'message' => __( 'Import job is paused.', 'better-wordpress-importer' ),
 				);
 			}
@@ -177,7 +199,8 @@ class Better_Import_Processor {
 		$job->completed_at = current_time( 'mysql', true );
 		$job->mapping_state = $remapper->to_array();
 		$this->job_repo->sync_counters_from_queue( $job );
-		$this->job_repo->save( $job );
+		$this->job_repo->save_state( $job );
+		$restore_runtime();
 		$this->release_lock( $job->id );
 
 		/**
@@ -224,7 +247,9 @@ class Better_Import_Processor {
 			}
 
 			$step_result = $this->process_next_step( $job, $item, $payload, $remapper, $logger );
-			$this->checkpoint( $job, $item, $remapper );
+			if ( 'failed' !== $step_result['status'] ) {
+				$this->checkpoint( $item );
+			}
 
 			if ( ( microtime( true ) - $entity_start ) > $entity_timeout && 'complete' !== $step_result['status'] && 'skipped' !== $step_result['status'] ) {
 				$this->mark_item_failed(
@@ -251,7 +276,7 @@ class Better_Import_Processor {
 
 		$job->mapping_state = $remapper->to_array();
 		$this->job_repo->sync_counters_from_queue( $job );
-		$this->job_repo->save( $job );
+		$this->job_repo->save_state( $job );
 
 		if ( $processed > 0 || $skipped > 0 || $failed > 0 ) {
 			$logger->info(
@@ -265,7 +290,21 @@ class Better_Import_Processor {
 			);
 		}
 
+		if ( ! empty( $this->skipped_taxonomies ) ) {
+			foreach ( $this->skipped_taxonomies as $taxonomy => $count ) {
+				$logger->warning(
+					sprintf(
+						/* translators: 1: assignment count, 2: taxonomy slug */
+						__( 'Skipped %1$d term assignments because taxonomy "%2$s" is not registered on this site.', 'better-wordpress-importer' ),
+						$count,
+						$taxonomy
+					)
+				);
+			}
+		}
+
 		$this->release_lock( $job->id );
+		$restore_runtime();
 
 		return array(
 			'job_id'      => $job->id,
@@ -317,22 +356,6 @@ class Better_Import_Processor {
 	 * @return array<string, string>
 	 */
 	protected function process_next_step( Better_Import_Job $job, Better_Import_Queue_Item $item, array $payload, Better_Import_Remapper $remapper, Better_Logger $logger ) {
-		if ( ! in_array( $item->entity_type, array( 'user', 'term' ), true ) ) {
-			$missing_taxonomies = $this->importer->get_missing_term_taxonomies( isset( $payload['terms'] ) ? $payload['terms'] : array() );
-			if ( ! empty( $missing_taxonomies ) ) {
-				$message = sprintf(
-					/* translators: %s: comma-separated taxonomy slugs */
-					__( 'Cannot import this post because these taxonomies are not registered on this site: %s. Install/activate the plugin or theme that registers them, then retry this item.', 'better-wordpress-importer' ),
-					implode( ', ', $missing_taxonomies )
-				);
-
-				$this->mark_item_failed( $item, 'better_importer_taxonomy_missing', $message );
-				$logger->error( $message, $item->entity_index );
-
-				return array( 'status' => 'failed' );
-			}
-		}
-
 		switch ( $item->step ) {
 			case 'create':
 				return $this->step_create_entity( $job, $item, $payload, $remapper, $logger );
@@ -433,12 +456,16 @@ class Better_Import_Processor {
 	 * @return array<string, string>
 	 */
 	protected function step_import_meta_chunk( Better_Import_Job $job, Better_Import_Queue_Item $item, array $payload ) {
-		$chunk_size = (int) $job->get_option( 'meta_chunk_size', 25 );
+		$chunk_size = (int) $job->get_option( 'meta_chunk_size', 200 );
 		$meta       = isset( $payload['meta'] ) ? $payload['meta'] : array();
 		$slice      = array_slice( $meta, $item->step_cursor, $chunk_size );
 		$post_data  = isset( $payload['data'] ) ? $payload['data'] : array();
 
-		$this->importer->import_meta_chunk( $item->new_entity_id, $slice, $post_data );
+		$result = $this->importer->import_meta_chunk( $item->new_entity_id, $slice, $post_data );
+		if ( is_wp_error( $result ) ) {
+			$this->mark_item_failed( $item, $result->get_error_code(), $result->get_error_message() );
+			return array( 'status' => 'failed' );
+		}
 
 		$item->step_cursor += count( $slice );
 
@@ -472,7 +499,7 @@ class Better_Import_Processor {
 	 * @return array<string, string>
 	 */
 	protected function step_import_comments_chunk( Better_Import_Job $job, Better_Import_Queue_Item $item, array $payload, Better_Import_Remapper $remapper ) {
-		$chunk_size = (int) $job->get_option( 'comment_chunk_size', 25 );
+		$chunk_size = (int) $job->get_option( 'comment_chunk_size', 100 );
 		$comments   = isset( $payload['comments'] ) ? $payload['comments'] : array();
 		$slice      = array_slice( $comments, $item->step_cursor, $chunk_size );
 
@@ -505,6 +532,14 @@ class Better_Import_Processor {
 	 * @return array<string, string>
 	 */
 	protected function step_assign_terms( Better_Import_Job $job, Better_Import_Queue_Item $item, array $payload, Better_Logger $logger ) {
+		$missing_taxonomies = $this->importer->get_missing_term_taxonomies( isset( $payload['terms'] ) ? $payload['terms'] : array() );
+		foreach ( $missing_taxonomies as $taxonomy ) {
+			if ( ! isset( $this->skipped_taxonomies[ $taxonomy ] ) ) {
+				$this->skipped_taxonomies[ $taxonomy ] = 0;
+			}
+			++$this->skipped_taxonomies[ $taxonomy ];
+		}
+
 		$result = $this->importer->assign_terms( $item->new_entity_id, isset( $payload['terms'] ) ? $payload['terms'] : array() );
 
 		if ( is_wp_error( $result ) ) {
@@ -536,20 +571,20 @@ class Better_Import_Processor {
 	}
 
 	/**
-	 * Persist queue item and job mapping state after a sub-step.
+	 * Persist a queue item after a sub-step.
+	 *
+	 * Only the queue row is written here. The job row (mapping state and
+	 * counters) is persisted once per batch, not per sub-step, so the
+	 * immutable entity manifest is never rewritten inside the hot loop.
 	 *
 	 * @since 1.1.0
 	 *
-	 * @param Better_Import_Job        $job      Import job.
-	 * @param Better_Import_Queue_Item $item     Queue item.
-	 * @param Better_Import_Remapper   $remapper ID remapper.
+	 * @param Better_Import_Queue_Item $item Queue item.
 	 *
 	 * @return void
 	 */
-	protected function checkpoint( Better_Import_Job $job, Better_Import_Queue_Item $item, Better_Import_Remapper $remapper ) {
+	protected function checkpoint( Better_Import_Queue_Item $item ) {
 		$this->queue_repo->save( $item );
-		$job->mapping_state = $remapper->to_array();
-		$this->job_repo->save( $job );
 	}
 
 	/**

@@ -153,6 +153,104 @@ class Better_Import_Job_Repository {
 	}
 
 	/**
+	 * Persist only the volatile job columns that change during processing.
+	 *
+	 * Unlike {@see save()}, this never re-encodes the immutable
+	 * item_manifest, options, or preflight_data columns. Those hold the full
+	 * entity manifest (thousands of entries) and rewriting them on every batch
+	 * boundary is the dominant source of write amplification during large
+	 * imports. Use this in the hot path; use {@see save()} only at creation
+	 * and when options/manifest actually change.
+	 *
+	 * @since 1.6.0
+	 *
+	 * @param Better_Import_Job $job Job instance.
+	 *
+	 * @return true|WP_Error
+	 */
+	public function save_state( Better_Import_Job $job ) {
+		global $wpdb;
+
+		if ( $job->id <= 0 ) {
+			return $this->save( $job );
+		}
+
+		$now  = current_time( 'mysql', true );
+		$data = array(
+			'status'            => $job->status,
+			'phase'             => $job->phase,
+			'phase_cursor'      => $job->phase_cursor,
+			'imported_posts'    => $job->imported_posts,
+			'imported_comments' => $job->imported_comments,
+			'imported_terms'    => $job->imported_terms,
+			'imported_users'    => $job->imported_users,
+			'imported_media'    => $job->imported_media,
+			'skipped_posts'     => $job->skipped_posts,
+			'skipped_comments'  => $job->skipped_comments,
+			'skipped_terms'     => $job->skipped_terms,
+			'skipped_users'     => $job->skipped_users,
+			'skipped_media'     => $job->skipped_media,
+			'failed_items'      => $job->failed_items,
+			'mapping_state'     => wp_json_encode( $job->mapping_state ),
+			'started_at'        => $job->started_at,
+			'completed_at'      => $job->completed_at,
+			'updated_at'        => $now,
+		);
+
+		$format = array(
+			'%s', '%s', '%d',
+			'%d', '%d', '%d', '%d', '%d',
+			'%d', '%d', '%d', '%d', '%d',
+			'%d', '%s', '%s', '%s', '%s',
+		);
+
+		$result = $wpdb->update(
+			$this->table,
+			$data,
+			array( 'id' => $job->id ),
+			$format,
+			array( '%d' )
+		);
+
+		if ( false === $result ) {
+			return new WP_Error(
+				'better_importer.job.save_failed',
+				__( 'Could not save the import job.', 'better-wordpress-importer' )
+			);
+		}
+
+		$job->updated_at = $now;
+
+		return true;
+	}
+
+	/**
+	 * Read just the current status of a job without hydrating the full row.
+	 *
+	 * The batch loop polls for external pause/cancel requests on every
+	 * iteration; hydrating the whole job (which decodes the entity manifest)
+	 * for that check is wasteful. This reads a single column instead.
+	 *
+	 * @since 1.6.0
+	 *
+	 * @param int $job_id Job ID.
+	 *
+	 * @return string|null Status string, or null when the job no longer exists.
+	 */
+	public function get_status( $job_id ) {
+		global $wpdb;
+
+		$status = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT status FROM {$this->table} WHERE id = %d",
+				absint( $job_id )
+			)
+		);
+
+		return null === $status ? null : (string) $status;
+	}
+
+	/**
 	 * Sync imported/skipped/failed counters from queue rows.
 	 *
 	 * @since 1.1.0

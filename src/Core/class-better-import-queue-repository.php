@@ -400,6 +400,49 @@ class Better_Import_Queue_Repository {
 	}
 
 	/**
+	 * Fetch aggregate queue status counts grouped by entity type.
+	 *
+	 * @since 1.5.0
+	 *
+	 * @param int $job_id Import job ID.
+	 *
+	 * @return array<string, array<string, int>>
+	 */
+	public function get_type_status_summary( $job_id ) {
+		global $wpdb;
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT entity_type, status, COUNT(*) AS total
+				FROM {$this->table}
+				WHERE job_id = %d
+				GROUP BY entity_type, status",
+				absint( $job_id )
+			),
+			ARRAY_A
+		);
+
+		$summary = array();
+
+		foreach ( $rows as $row ) {
+			$type   = isset( $row['entity_type'] ) ? (string) $row['entity_type'] : '';
+			$status = isset( $row['status'] ) ? (string) $row['status'] : '';
+
+			if ( '' === $type || '' === $status ) {
+				continue;
+			}
+
+			if ( ! isset( $summary[ $type ] ) ) {
+				$summary[ $type ] = array();
+			}
+
+			$summary[ $type ][ $status ] = isset( $row['total'] ) ? (int) $row['total'] : 0;
+		}
+
+		return $summary;
+	}
+
+	/**
 	 * Get the current in-progress queue item for display.
 	 *
 	 * @since 1.2.0

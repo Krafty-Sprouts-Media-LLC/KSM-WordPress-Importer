@@ -163,11 +163,10 @@ class Better_Importer {
 
 		if ( ! taxonomy_exists( $taxonomy ) ) {
 			return array(
-				'status' => 'failed',
-				'code'   => 'better_importer_taxonomy_missing',
-				'error'  => sprintf(
+				'status'  => 'skipped',
+				'message' => sprintf(
 					/* translators: %s: taxonomy slug */
-					__( 'Taxonomy "%s" is not registered on this site. Install/activate the plugin or theme that registers it, then retry this item.', 'better-wordpress-importer' ),
+					__( 'Skipped source term because taxonomy "%s" is not registered on this site.', 'better-wordpress-importer' ),
 					$taxonomy
 				),
 			);
@@ -317,6 +316,10 @@ class Better_Importer {
 	 * @return true|WP_Error
 	 */
 	public function import_meta_chunk( $post_id, array $meta_rows, array $post_data ) {
+		global $wpdb;
+
+		$rows = array();
+
 		foreach ( $meta_rows as $meta_item ) {
 			if ( empty( $meta_item['key'] ) ) {
 				continue;
@@ -329,7 +332,33 @@ class Better_Importer {
 				continue;
 			}
 
-			update_post_meta( $post_id, wp_slash( $key ), wp_slash( $value ) );
+			$rows[] = array(
+				'key'   => (string) $key,
+				'value' => maybe_serialize( $value ),
+			);
+		}
+
+		if ( ! empty( $rows ) ) {
+			$placeholders = array();
+			$values       = array();
+
+			foreach ( $rows as $row ) {
+				$placeholders[] = '(%d, %s, %s)';
+				$values[]       = absint( $post_id );
+				$values[]       = $row['key'];
+				$values[]       = $row['value'];
+			}
+
+			$sql = "INSERT INTO {$wpdb->postmeta} (post_id, meta_key, meta_value) VALUES " . implode( ', ', $placeholders );
+
+			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- placeholders are generated above.
+			$result = $wpdb->query( $wpdb->prepare( $sql, $values ) );
+			if ( false === $result ) {
+				return new WP_Error(
+					'better_importer.meta.insert_failed',
+					__( 'Could not import post meta rows.', 'better-wordpress-importer' )
+				);
+			}
 		}
 
 		update_post_meta( $post_id, '_better_import_meta_cursor', time() );
@@ -411,20 +440,11 @@ class Better_Importer {
 		}
 
 		if ( ! empty( $missing ) ) {
-			$missing = array_values( array_unique( $missing ) );
-
-			return new WP_Error(
-				'better_importer_taxonomy_missing',
-				sprintf(
-					/* translators: %s: comma-separated taxonomy slugs */
-					__( 'Cannot assign terms because these taxonomies are not registered on this site: %s. Install/activate the plugin or theme that registers them, then retry this item.', 'better-wordpress-importer' ),
-					implode( ', ', $missing )
-				)
-			);
+			update_post_meta( $post_id, '_better_import_skipped_taxonomies', $missing );
 		}
 
 		foreach ( $grouped as $taxonomy => $names ) {
-			wp_set_post_terms( $post_id, $names, $taxonomy );
+			wp_set_post_terms( $post_id, array_values( array_unique( $names ) ), $taxonomy );
 		}
 
 		return true;
