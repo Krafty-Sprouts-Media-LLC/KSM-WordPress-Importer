@@ -278,6 +278,7 @@ class Better_Import_Job_Repository {
 		$job->imported_users    = 0;
 		$job->imported_terms    = 0;
 		$job->imported_media    = 0;
+		$job->imported_comments = 0;
 		$job->skipped_posts     = 0;
 		$job->skipped_users     = 0;
 		$job->skipped_terms     = 0;
@@ -313,6 +314,19 @@ class Better_Import_Job_Repository {
 				$job->failed_items += $total;
 			}
 		}
+
+		// Comments are imported as sub-steps rather than queue rows, so count
+		// them from the posts this job created.
+		$job->imported_comments = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->comments} c
+				INNER JOIN {$wpdb->postmeta} pm
+					ON pm.post_id = c.comment_post_ID
+					AND pm.meta_key = '_better_import_job_id'
+					AND pm.meta_value = %d",
+				$job->id
+			)
+		);
 	}
 
 	/**

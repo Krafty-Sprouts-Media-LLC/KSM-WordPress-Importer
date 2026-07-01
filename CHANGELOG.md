@@ -13,14 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `unknown_post_type_strategy` import option (`import_as_draft` default, or `skip` / `fail`). Unknown post types are imported as drafts with the source type preserved in `_better_import_original_post_type` instead of failing the post.
 - `better_importer.meta.unique_keys` filter listing single-value meta keys that are replaced rather than appended.
 - `meta_write_mode` import option (`bulk` default, or `hooked`). In `hooked` mode post meta is written with `add_post_meta()` so plugin hooks run and `_edit_last` is remapped to the local user, for stacks that depend on meta hooks.
+- Real attachment import: when "Download and import file attachments" is enabled, media files are fetched from the source URL, sideloaded into the uploads directory, inserted with `wp_insert_attachment()`, and given generated metadata/thumbnails. Adds `update_attachment_guids` / `remap_content_urls` options and a `better_importer.attachment.download_timeout` filter.
+- Source media URLs in post content are rewritten to the local uploads URL during the remapping phase (controlled by `remap_content_urls`, default on when media import is enabled).
+- Settings UI controls for the unknown-post-type strategy and post-meta write mode.
 
 ### Fixed
 - Child posts whose parent or author appears later in the export file now have their `post_parent` / `post_author` resolved during the remapping phase instead of being left at 0 / the default author.
 - Deferred parent/author markers are now actually written to the database. They were previously appended to a discarded copy of the meta array and never persisted, so cross-order relationships were silently lost.
 - Comments now remap `comment_parent` to the local parent comment and `user_id` to the local author instead of hardcoding a top-level comment and reusing the source user ID.
 - Single-value post meta keys (`_thumbnail_id`, `_wp_page_template`, etc.) are replaced instead of appended, preventing duplicate rows — and broken featured images/templates — when a post is re-imported.
+- Category/term parent hierarchy is now imported. `import_term()` resolves the parent by slug (deferring forward references to the remapping phase), so nested taxonomies keep their structure instead of importing flat.
+- Sticky posts are re-stuck on import (`is_sticky` was parsed but ignored).
+- Nav menu items have their `_menu_item_object_id` and `_menu_item_menu_item_parent` remapped to local IDs during the remapping phase, so imported menus point at the right posts/terms instead of source-site IDs.
+- Comment counts are populated in job stats (comments are sub-steps, so they are counted from the imported posts), instead of always showing 0.
 
 ### Changed
+- `Better_Install::maybe_install()` runs `dbDelta` only when the stored schema version changed, instead of on every admin page load.
 - Batch processing no longer rewrites the full job row (including the immutable entity manifest and growing ID mapping) after every sub-step. A new `Better_Import_Job_Repository::save_state()` persists only the volatile progress columns at batch boundaries, and per-sub-step checkpoints now write only the queue row. This removes the O(total-entities) write amplification that made large imports slow down as they progressed.
 - The batch loop polls for external pause/cancel requests with a single-column `Better_Import_Job_Repository::get_status()` read instead of re-hydrating (and JSON-decoding) the entire job manifest on every iteration.
 - `Better_Import_Remapper` now resolves the large `post`, `user`, and `term_id` mappings on demand from the queue table instead of carrying them in the job row. Only the small derived buckets (`user_slug`, `term`, `comment`) are persisted in `mapping_state`, keeping the persisted mapping bounded regardless of import size.

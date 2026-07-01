@@ -178,6 +178,24 @@ class Better_Install {
 	}
 
 	/**
+	 * Install or upgrade tables only when the schema version changed.
+	 *
+	 * Runs on every admin request, so it must be cheap. `dbDelta` is only
+	 * invoked when the stored schema version differs from {@see DB_VERSION}.
+	 *
+	 * @since 1.6.0
+	 *
+	 * @return void
+	 */
+	public static function maybe_install() {
+		if ( get_option( 'better_importer_db_version' ) === self::DB_VERSION ) {
+			return;
+		}
+
+		self::install_tables();
+	}
+
+	/**
 	 * Run install on plugin activation.
 	 *
 	 * @since 1.0.0

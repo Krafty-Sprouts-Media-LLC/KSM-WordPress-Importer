@@ -137,6 +137,12 @@ class Better_Import_Processor {
 		$max_seconds    = $max_seconds > 0 ? $max_seconds : (int) apply_filters( 'better_importer.batch.seconds', self::DEFAULT_BATCH_SECONDS, $job );
 		$entity_timeout = $entity_timeout > 0 ? $entity_timeout : (int) apply_filters( 'better_importer.entity.timeout', self::DEFAULT_ENTITY_TIMEOUT, $job );
 
+		// Fetching attachments performs remote downloads, so give each entity —
+		// and the PHP process — more headroom to avoid failing created media.
+		if ( $job->get_option( 'fetch_attachments', false ) && $entity_timeout < 60 ) {
+			$entity_timeout = 60;
+		}
+
 		$logger           = new Better_Logger( $job->id );
 		$this->importer   = new Better_Importer( $logger );
 		$remapper         = Better_Import_Remapper::from_job( $job );
@@ -151,7 +157,7 @@ class Better_Import_Processor {
 		}
 
 		wp_raise_memory_limit( 'admin' );
-		set_time_limit( max( 30, $max_seconds + 5 ) );
+		set_time_limit( max( 30, $max_seconds + $entity_timeout + 5 ) );
 
 		$previous_cache_invalidation = wp_suspend_cache_invalidation( true );
 		$previous_term_counting      = wp_defer_term_counting();

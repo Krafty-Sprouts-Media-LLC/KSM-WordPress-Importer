@@ -24,6 +24,14 @@ class Better_Importer {
 	protected $logger;
 
 	/**
+	 * Cached source-URL to local-URL map for content rewriting.
+	 *
+	 * @since 1.6.0
+	 * @var array<string, string>|null
+	 */
+	protected $url_map = null;
+
+	/**
 	 * Constructor.
 	 *
 	 * @since 1.1.0
@@ -211,6 +219,16 @@ class Better_Importer {
 			$termdata['description'] = $data['description'];
 		}
 
+		// WXR stores the parent as its slug. Resolve it to a local term when
+		// the parent has already been imported.
+		$parent_slug = isset( $data['parent'] ) ? (string) $data['parent'] : '';
+		if ( '' !== $parent_slug ) {
+			$mapped_parent = $remapper->get( 'term', sha1( $taxonomy . ':' . $parent_slug ) );
+			if ( $mapped_parent ) {
+				$termdata['parent'] = (int) $mapped_parent;
+			}
+		}
+
 		$result = wp_insert_term( $data['name'], $taxonomy, $termdata );
 		if ( is_wp_error( $result ) ) {
 			return array(
@@ -222,6 +240,12 @@ class Better_Importer {
 		$term_id = (int) $result['term_id'];
 		$remapper->set( 'term', $mapping_key, $term_id );
 		$remapper->set( 'term_id', $original_id, $term_id );
+
+		// Defer the parent link when the parent has not been imported yet; the
+		// remapping phase resolves it once every term exists.
+		if ( '' !== $parent_slug && empty( $termdata['parent'] ) ) {
+			add_term_meta( $term_id, '_better_import_term_parent', $parent_slug );
+		}
 
 		return array(
 			'status'        => 'complete',
@@ -251,6 +275,16 @@ class Better_Importer {
 				'status' => 'failed',
 				'error'  => __( 'Post is missing a post type.', 'better-wordpress-importer' ),
 			);
+		}
+
+		if ( 'attachment' === $data['post_type'] ) {
+			if ( ! $job->get_option( 'fetch_attachments', false ) ) {
+				return array(
+					'status'  => 'skipped',
+					'message' => __( 'Attachment skipped because media import is disabled.', 'better-wordpress-importer' ),
+				);
+			}
+			return $this->import_attachment( $job, $data, $remapper );
 		}
 
 		$original_post_type = '';
@@ -329,6 +363,27 @@ class Better_Importer {
 			foreach ( $deferred as $marker ) {
 				add_post_meta( $post_id, $marker['key'], $marker['value'] );
 			}
+
+			if ( isset( $data['is_sticky'] ) && '1' === (string) $data['is_sticky'] ) {
+				stick_post( $post_id );
+			}
+
+			// Menu items carry source object/parent IDs in meta that must be
+			// remapped once every entity exists; flag them for the remap phase.
+			if ( 'nav_menu_item' === $data['post_type'] ) {
+				add_post_meta( $post_id, '_better_import_menu_item', 1 );
+			}
+
+			// Flag posts that reference uploads so the remap phase can rewrite
+			// source media URLs to local ones once attachments are imported.
+			if (
+				$job->get_option( 'fetch_attachments', false )
+				&& $job->get_option( 'remap_content_urls', true )
+				&& ! empty( $data['post_content'] )
+				&& false !== strpos( $data['post_content'], 'wp-content/uploads' )
+			) {
+				add_post_meta( $post_id, '_better_import_rewrite_pending', 1 );
+			}
 		}
 
 		$remapper->set( 'post', $original_id, $post_id );
@@ -337,6 +392,224 @@ class Better_Importer {
 			'status'        => 'created',
 			'new_entity_id' => (int) $post_id,
 		);
+	}
+
+	/**
+	 * Import an attachment by fetching its source file into the media library.
+	 *
+	 * @since 1.6.0
+	 *
+	 * @param Better_Import_Job      $job      Import job.
+	 * @param array<string, mixed>   $data     Attachment post data.
+	 * @param Better_Import_Remapper $remapper ID remapper.
+	 *
+	 * @return array<string, mixed>
+	 */
+	protected function import_attachment( Better_Import_Job $job, array $data, Better_Import_Remapper $remapper ) {
+		$original_id = isset( $data['post_id'] ) ? (int) $data['post_id'] : 0;
+
+		$existing = $this->post_exists( $data );
+		if ( $existing ) {
+			$remapper->set( 'post', $original_id, $existing );
+			return array(
+				'status'        => 'skipped',
+				'new_entity_id' => $existing,
+				'message'       => sprintf(
+					/* translators: 1: attachment title, 2: local post ID */
+					__( 'Mapped existing attachment "%1$s" to #%2$d.', 'better-wordpress-importer' ),
+					isset( $data['post_title'] ) ? $data['post_title'] : '',
+					$existing
+				),
+			);
+		}
+
+		$remote_url = ! empty( $data['attachment_url'] ) ? $data['attachment_url'] : ( ! empty( $data['guid'] ) ? $data['guid'] : '' );
+		if ( '' === $remote_url ) {
+			return array(
+				'status' => 'failed',
+				'code'   => 'better_importer.attachment.no_url',
+				'error'  => __( 'Attachment has no source URL to fetch.', 'better-wordpress-importer' ),
+			);
+		}
+
+		// Resolve a root-relative URL against the source site base.
+		if ( '/' === substr( $remote_url, 0, 1 ) ) {
+			$base = $this->source_base_url( $job );
+			if ( '' !== $base ) {
+				$remote_url = rtrim( $base, '/' ) . '/' . ltrim( $remote_url, '/' );
+			}
+		}
+
+		$upload = $this->fetch_remote_file( $remote_url );
+		if ( is_wp_error( $upload ) ) {
+			return array(
+				'status' => 'failed',
+				'code'   => 'better_importer.attachment.fetch_failed',
+				'error'  => $upload->get_error_message(),
+			);
+		}
+
+		$deferred                  = array();
+		$postarr                   = $this->map_post_authors_and_parents( $data, $deferred, $job, $remapper );
+		$postarr['post_status']    = 'inherit';
+		$postarr['post_mime_type'] = $upload['type'];
+		if ( $job->get_option( 'update_attachment_guids', false ) ) {
+			$postarr['guid'] = $upload['url'];
+		}
+
+		$attach_id = wp_insert_attachment( wp_slash( $postarr ), $upload['file'], 0, true );
+		if ( is_wp_error( $attach_id ) ) {
+			return array(
+				'status' => 'failed',
+				'code'   => 'better_importer.attachment.insert_failed',
+				'error'  => $attach_id->get_error_message(),
+			);
+		}
+
+		require_once ABSPATH . 'wp-admin/includes/image.php';
+		$metadata = wp_generate_attachment_metadata( $attach_id, $upload['file'] );
+		if ( ! empty( $metadata ) ) {
+			wp_update_attachment_metadata( $attach_id, $metadata );
+		}
+
+		update_post_meta( $attach_id, '_better_import_job_id', $job->id );
+		update_post_meta( $attach_id, '_better_import_original_id', $original_id );
+		add_post_meta( $attach_id, '_better_import_source_url', esc_url_raw( $remote_url ) );
+
+		foreach ( $deferred as $marker ) {
+			add_post_meta( $attach_id, $marker['key'], $marker['value'] );
+		}
+
+		$remapper->set( 'post', $original_id, $attach_id );
+
+		return array(
+			'status'        => 'created',
+			'new_entity_id' => (int) $attach_id,
+		);
+	}
+
+	/**
+	 * Download a remote file into the uploads directory.
+	 *
+	 * @since 1.6.0
+	 *
+	 * @param string $url Remote file URL.
+	 *
+	 * @return array<string, string>|WP_Error File data (file, url, type) or error.
+	 */
+	protected function fetch_remote_file( $url ) {
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+
+		/**
+		 * Filter the remote attachment download timeout in seconds.
+		 *
+		 * @since 1.6.0
+		 *
+		 * @param int    $timeout Timeout in seconds.
+		 * @param string $url     Remote file URL.
+		 */
+		$timeout = (int) apply_filters( 'better_importer.attachment.download_timeout', 30, $url );
+
+		$tmp = download_url( $url, $timeout );
+		if ( is_wp_error( $tmp ) ) {
+			return $tmp;
+		}
+
+		$name = basename( (string) wp_parse_url( $url, PHP_URL_PATH ) );
+		if ( '' === $name ) {
+			$name = 'import-' . md5( $url );
+		}
+
+		$file_array = array(
+			'name'     => $name,
+			'tmp_name' => $tmp,
+		);
+
+		$file = wp_handle_sideload( $file_array, array( 'test_form' => false ) );
+
+		if ( file_exists( $tmp ) ) {
+			wp_delete_file( $tmp );
+		}
+
+		if ( isset( $file['error'] ) ) {
+			return new WP_Error( 'better_importer.attachment.sideload_failed', $file['error'] );
+		}
+
+		return array(
+			'file' => $file['file'],
+			'url'  => $file['url'],
+			'type' => $file['type'],
+		);
+	}
+
+	/**
+	 * Source site base URL for resolving relative media paths.
+	 *
+	 * @since 1.6.0
+	 *
+	 * @param Better_Import_Job $job Import job.
+	 *
+	 * @return string
+	 */
+	protected function source_base_url( Better_Import_Job $job ) {
+		$preflight = is_array( $job->preflight_data ) ? $job->preflight_data : array();
+
+		if ( ! empty( $preflight['siteurl'] ) ) {
+			return (string) $preflight['siteurl'];
+		}
+		if ( ! empty( $preflight['home'] ) ) {
+			return (string) $preflight['home'];
+		}
+
+		return '';
+	}
+
+	/**
+	 * Build (and cache for this request) the source→local media URL map.
+	 *
+	 * @since 1.6.0
+	 *
+	 * @param Better_Import_Job $job Import job.
+	 *
+	 * @return array<string, string>
+	 */
+	protected function content_url_map( Better_Import_Job $job ) {
+		if ( null !== $this->url_map ) {
+			return $this->url_map;
+		}
+
+		global $wpdb;
+		$this->url_map = array();
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT pm.post_id AS post_id, pm.meta_value AS source_url
+				FROM {$wpdb->postmeta} pm
+				INNER JOIN {$wpdb->postmeta} j
+					ON j.post_id = pm.post_id AND j.meta_key = '_better_import_job_id' AND j.meta_value = %d
+				WHERE pm.meta_key = '_better_import_source_url'",
+				$job->id
+			)
+		);
+
+		foreach ( $rows as $row ) {
+			$new_url = wp_get_attachment_url( (int) $row->post_id );
+			if ( ! $new_url ) {
+				continue;
+			}
+
+			$src = (string) $row->source_url;
+			$this->url_map[ $src ] = $new_url;
+
+			// Map the opposite scheme too so http/https references both resolve.
+			if ( 0 === strpos( $src, 'https://' ) ) {
+				$this->url_map[ 'http://' . substr( $src, 8 ) ] = $new_url;
+			} elseif ( 0 === strpos( $src, 'http://' ) ) {
+				$this->url_map[ 'https://' . substr( $src, 7 ) ] = $new_url;
+			}
+		}
+
+		return $this->url_map;
 	}
 
 	/**
@@ -364,7 +637,8 @@ class Better_Importer {
 			return $this->import_meta_chunk_hooked( $post_id, $meta_rows, $post_data, $remapper );
 		}
 
-		$unique_keys = $this->unique_meta_keys();
+		$unique_keys   = $this->unique_meta_keys();
+		$is_attachment = isset( $post_data['post_type'] ) && 'attachment' === $post_data['post_type'];
 
 		$rows        = array();
 		$unique_rows = array();
@@ -376,6 +650,12 @@ class Better_Importer {
 
 			$key   = $meta_item['key'];
 			$value = isset( $meta_item['value'] ) ? $meta_item['value'] : '';
+
+			// The correct file path and metadata are generated during attachment
+			// import; never overwrite them with the source file's stale values.
+			if ( $is_attachment && ( '_wp_attached_file' === $key || '_wp_attachment_metadata' === $key ) ) {
+				continue;
+			}
 
 			if ( ! apply_filters( 'better_importer.pre_process.post_meta', true, $key, $value, $post_id, $post_data ) ) {
 				continue;
@@ -470,7 +750,8 @@ class Better_Importer {
 	 * @return true
 	 */
 	protected function import_meta_chunk_hooked( $post_id, array $meta_rows, array $post_data, Better_Import_Remapper $remapper = null ) {
-		$unique_keys = $this->unique_meta_keys();
+		$unique_keys   = $this->unique_meta_keys();
+		$is_attachment = isset( $post_data['post_type'] ) && 'attachment' === $post_data['post_type'];
 
 		foreach ( $meta_rows as $meta_item ) {
 			if ( empty( $meta_item['key'] ) ) {
@@ -479,6 +760,12 @@ class Better_Importer {
 
 			$key   = $meta_item['key'];
 			$value = isset( $meta_item['value'] ) ? $meta_item['value'] : '';
+
+			// Never overwrite the attachment file path/metadata generated during
+			// import with the source file's stale values.
+			if ( $is_attachment && ( '_wp_attached_file' === $key || '_wp_attachment_metadata' === $key ) ) {
+				continue;
+			}
 
 			if ( ! apply_filters( 'better_importer.pre_process.post_meta', true, $key, $value, $post_id, $post_data ) ) {
 				continue;
@@ -695,6 +982,106 @@ class Better_Importer {
 			}
 			delete_post_meta( $post_id, '_better_import_user_slug' );
 			++$handled;
+		}
+
+		$term_parent_rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT term_id AS term_id, meta_value AS parent_slug
+				FROM {$wpdb->termmeta}
+				WHERE meta_key = '_better_import_term_parent'
+				LIMIT %d",
+				$chunk_size
+			)
+		);
+
+		foreach ( $term_parent_rows as $row ) {
+			$term_id = (int) $row->term_id;
+			$term    = get_term( $term_id );
+			if ( $term instanceof WP_Term ) {
+				$mapped_parent = $remapper->get( 'term', sha1( $term->taxonomy . ':' . $row->parent_slug ) );
+				if ( $mapped_parent ) {
+					wp_update_term( $term_id, $term->taxonomy, array( 'parent' => (int) $mapped_parent ) );
+				}
+			}
+			delete_term_meta( $term_id, '_better_import_term_parent' );
+			++$handled;
+		}
+
+		$menu_rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT pm.post_id AS post_id
+				FROM {$wpdb->postmeta} pm
+				INNER JOIN {$wpdb->postmeta} j
+					ON j.post_id = pm.post_id AND j.meta_key = '_better_import_job_id' AND j.meta_value = %d
+				WHERE pm.meta_key = '_better_import_menu_item'
+				LIMIT %d",
+				$job->id,
+				$chunk_size
+			)
+		);
+
+		foreach ( $menu_rows as $row ) {
+			$post_id   = (int) $row->post_id;
+			$item_type = get_post_meta( $post_id, '_menu_item_type', true );
+			$object_id = (int) get_post_meta( $post_id, '_menu_item_object_id', true );
+
+			if ( $object_id ) {
+				$mapped_object = null;
+				if ( 'taxonomy' === $item_type ) {
+					$mapped_object = $remapper->get( 'term_id', $object_id );
+				} elseif ( 'post_type' === $item_type || 'post_type_archive' === $item_type ) {
+					$mapped_object = $remapper->get( 'post', $object_id );
+				}
+				if ( $mapped_object ) {
+					update_post_meta( $post_id, '_menu_item_object_id', (int) $mapped_object );
+				}
+			}
+
+			$parent_source = (int) get_post_meta( $post_id, '_menu_item_menu_item_parent', true );
+			if ( $parent_source ) {
+				$mapped_parent = $remapper->get( 'post', $parent_source );
+				if ( $mapped_parent ) {
+					update_post_meta( $post_id, '_menu_item_menu_item_parent', (int) $mapped_parent );
+				}
+			}
+
+			delete_post_meta( $post_id, '_better_import_menu_item' );
+			++$handled;
+		}
+
+		$rewrite_rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT pm.post_id AS post_id
+				FROM {$wpdb->postmeta} pm
+				INNER JOIN {$wpdb->postmeta} j
+					ON j.post_id = pm.post_id AND j.meta_key = '_better_import_job_id' AND j.meta_value = %d
+				WHERE pm.meta_key = '_better_import_rewrite_pending'
+				LIMIT %d",
+				$job->id,
+				$chunk_size
+			)
+		);
+
+		if ( ! empty( $rewrite_rows ) ) {
+			$url_map = $this->content_url_map( $job );
+
+			foreach ( $rewrite_rows as $row ) {
+				$post_id = (int) $row->post_id;
+
+				if ( ! empty( $url_map ) ) {
+					$post = get_post( $post_id );
+					if ( $post instanceof WP_Post ) {
+						$new_content = strtr( $post->post_content, $url_map );
+						if ( $new_content !== $post->post_content ) {
+							$wpdb->update( $wpdb->posts, array( 'post_content' => $new_content ), array( 'ID' => $post_id ), array( '%s' ), array( '%d' ) );
+							clean_post_cache( $post_id );
+						}
+					}
+				}
+
+				delete_post_meta( $post_id, '_better_import_rewrite_pending' );
+				++$handled;
+			}
 		}
 
 		return $handled;

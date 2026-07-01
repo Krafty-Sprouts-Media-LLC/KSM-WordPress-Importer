@@ -71,7 +71,7 @@ register_activation_hook( __FILE__, array( 'Better_Install', 'activate' ) );
  */
 function better_importer_init() {
 	if ( is_admin() ) {
-		Better_Install::install_tables();
+		Better_Install::maybe_install();
 		Better_Import_Ajax::register();
 		Better_Admin_UI::register();
 		Better_Admin_Settings::register();
