@@ -553,6 +553,7 @@ class Better_Admin_UI {
 							'importing'      => __( 'Importing…', 'better-wordpress-importer' ),
 							'paused'         => __( 'Import paused.', 'better-wordpress-importer' ),
 							'complete'       => __( 'Import complete!', 'better-wordpress-importer' ),
+							'completeWithFailures' => __( 'Import complete with failures.', 'better-wordpress-importer' ),
 							'failed'         => __( 'Import failed.', 'better-wordpress-importer' ),
 							'cancelled'      => __( 'Import cancelled.', 'better-wordpress-importer' ),
 							'background'     => __( 'Processing continues on the server. You can close this page and return later.', 'better-wordpress-importer' ),

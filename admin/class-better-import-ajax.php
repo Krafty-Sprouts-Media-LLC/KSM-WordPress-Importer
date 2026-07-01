@@ -163,11 +163,23 @@ class Better_Import_Ajax {
 			wp_send_json_error( array( 'message' => $file->get_error_message() ) );
 		}
 
+		$unknown_post_type = isset( $_POST['unknown_post_type_strategy'] ) ? sanitize_key( wp_unslash( $_POST['unknown_post_type_strategy'] ) ) : 'import_as_draft';
+		if ( ! in_array( $unknown_post_type, array( 'import_as_draft', 'skip', 'fail' ), true ) ) {
+			$unknown_post_type = 'import_as_draft';
+		}
+
+		$meta_write_mode = isset( $_POST['meta_write_mode'] ) ? sanitize_key( wp_unslash( $_POST['meta_write_mode'] ) ) : 'bulk';
+		if ( ! in_array( $meta_write_mode, array( 'bulk', 'hooked' ), true ) ) {
+			$meta_write_mode = 'bulk';
+		}
+
 		$options = array(
-			'fetch_attachments' => ! empty( $_POST['fetch_attachments'] ),
-			'default_author'    => isset( $_POST['default_author'] ) ? absint( $_POST['default_author'] ) : get_current_user_id(),
-			'job_label'         => isset( $_POST['job_label'] ) ? sanitize_text_field( wp_unslash( $_POST['job_label'] ) ) : '',
-			'user_id_map'       => self::sanitize_user_mapping(),
+			'fetch_attachments'          => ! empty( $_POST['fetch_attachments'] ),
+			'default_author'             => isset( $_POST['default_author'] ) ? absint( $_POST['default_author'] ) : get_current_user_id(),
+			'job_label'                  => isset( $_POST['job_label'] ) ? sanitize_text_field( wp_unslash( $_POST['job_label'] ) ) : '',
+			'user_id_map'                => self::sanitize_user_mapping(),
+			'unknown_post_type_strategy' => $unknown_post_type,
+			'meta_write_mode'            => $meta_write_mode,
 		);
 
 		$job = Better_Import_Job::create( $file['attachment_id'], $file['path'], $options );

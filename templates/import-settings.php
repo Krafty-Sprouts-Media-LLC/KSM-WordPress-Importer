@@ -111,6 +111,25 @@ $authors = isset( $preflight['authors'] ) && is_array( $preflight['authors'] ) ?
 	</p>
 
 	<p>
+		<label for="better-importer-unknown-pt"><?php esc_html_e( 'Unknown post types', 'better-wordpress-importer' ); ?></label><br />
+		<select id="better-importer-unknown-pt" name="unknown_post_type_strategy">
+			<option value="import_as_draft"><?php esc_html_e( 'Import as draft (preserve original type)', 'better-wordpress-importer' ); ?></option>
+			<option value="skip"><?php esc_html_e( 'Skip', 'better-wordpress-importer' ); ?></option>
+			<option value="fail"><?php esc_html_e( 'Fail the item', 'better-wordpress-importer' ); ?></option>
+		</select>
+		<br /><span class="description"><?php esc_html_e( 'What to do with content whose post type is not registered on this site (e.g. from a source theme or plugin).', 'better-wordpress-importer' ); ?></span>
+	</p>
+
+	<p>
+		<label for="better-importer-meta-mode"><?php esc_html_e( 'Post meta import', 'better-wordpress-importer' ); ?></label><br />
+		<select id="better-importer-meta-mode" name="meta_write_mode">
+			<option value="bulk"><?php esc_html_e( 'Fast (bulk insert)', 'better-wordpress-importer' ); ?></option>
+			<option value="hooked"><?php esc_html_e( 'Compatible (run meta hooks)', 'better-wordpress-importer' ); ?></option>
+		</select>
+		<br /><span class="description"><?php esc_html_e( 'Choose Compatible only if plugins rely on post-meta hooks (some SEO/ACF setups). Slower.', 'better-wordpress-importer' ); ?></span>
+	</p>
+
+	<p>
 		<label for="better-importer-job-label"><?php esc_html_e( 'Label (optional)', 'better-wordpress-importer' ); ?></label><br />
 		<input type="text" class="regular-text" id="better-importer-job-label" name="job_label" value="<?php echo esc_attr( basename( $file_path, '.xml' ) ); ?>" />
 	</p>

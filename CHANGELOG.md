@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 01/07/2026
+
+### Added
+- Two import-queue indexes (schema version `1.2.0`): `job_type_old` (`job_id, entity_type, old_entity_id`) powering `Better_Import_Queue_Repository::get_new_entity_id()` for O(1) old→new ID resolution, and `job_status_entity` (`job_id, status, entity_index`) so fetching the next work item no longer scans over completed rows.
+- Deferred-relationship remapping phase: after the queue drains, `Better_Importer::process_remap_chunk()` resolves `_better_import_parent` and `_better_import_user_slug` markers left by posts that were created before their parent or author existed, then the job completes.
+- `unknown_post_type_strategy` import option (`import_as_draft` default, or `skip` / `fail`). Unknown post types are imported as drafts with the source type preserved in `_better_import_original_post_type` instead of failing the post.
+- `better_importer.meta.unique_keys` filter listing single-value meta keys that are replaced rather than appended.
+- `meta_write_mode` import option (`bulk` default, or `hooked`). In `hooked` mode post meta is written with `add_post_meta()` so plugin hooks run and `_edit_last` is remapped to the local user, for stacks that depend on meta hooks.
+
+### Fixed
+- Child posts whose parent or author appears later in the export file now have their `post_parent` / `post_author` resolved during the remapping phase instead of being left at 0 / the default author.
+- Deferred parent/author markers are now actually written to the database. They were previously appended to a discarded copy of the meta array and never persisted, so cross-order relationships were silently lost.
+- Comments now remap `comment_parent` to the local parent comment and `user_id` to the local author instead of hardcoding a top-level comment and reusing the source user ID.
+- Single-value post meta keys (`_thumbnail_id`, `_wp_page_template`, etc.) are replaced instead of appended, preventing duplicate rows — and broken featured images/templates — when a post is re-imported.
+
+### Changed
+- Batch processing no longer rewrites the full job row (including the immutable entity manifest and growing ID mapping) after every sub-step. A new `Better_Import_Job_Repository::save_state()` persists only the volatile progress columns at batch boundaries, and per-sub-step checkpoints now write only the queue row. This removes the O(total-entities) write amplification that made large imports slow down as they progressed.
+- The batch loop polls for external pause/cancel requests with a single-column `Better_Import_Job_Repository::get_status()` read instead of re-hydrating (and JSON-decoding) the entire job manifest on every iteration.
+- `Better_Import_Remapper` now resolves the large `post`, `user`, and `term_id` mappings on demand from the queue table instead of carrying them in the job row. Only the small derived buckets (`user_slug`, `term`, `comment`) are persisted in `mapping_state`, keeping the persisted mapping bounded regardless of import size.
+- Progress polling derives per-status totals from the per-type summary, running one aggregate queue query per poll instead of two.
+
 ## [1.5.0] - 30/06/2026
 
 ### Added
@@ -21,9 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Queue rows are now seeded with persistent `parsed_payload` data during the initial parse so batch processing never reopens XML to seek by entity index.
 - Existing users are mapped by login/email instead of repeatedly failing with "username already exists" errors.
-- Missing custom taxonomies are reported as explicit failed/retryable work instead of being silently skipped or logged as generic invalid taxonomy errors.
+- Missing custom taxonomy assignments no longer fail the whole post; they are preserved in `_better_import_skipped_taxonomies` and summarized in the Activity Log.
 - Activity Log rendering now clears stale browser-side entries and escapes log output.
 - WP-CLI `--no-attachments` handling now maps correctly to the importer attachment option.
+- Disabled media imports now bulk-skip attachment queue rows instead of walking and saving thousands of attachment rows one at a time.
+- Source terms whose taxonomy is not registered on the destination are skipped with an explicit message instead of failing the import.
+- Duplicate term assignment values are de-duplicated before calling `wp_set_post_terms()`, avoiding duplicate relationship database warnings.
+- Progress cards now show failed counts per content type and completed jobs with failures use distinct completion copy.
 
 ### Changed
 - README, CONTRIBUTING, and `composer.json` updated for the 1.0 rebuild; removed obsolete `.travis.yml` and `find-deprecated-usage.php`.
@@ -31,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Admin CSS and JS assets use file modification times for cache-busting during active development.
 - Import progress counts now include comments in total/scanned entity reporting.
+- Progress polling now uses an incremental log cursor instead of returning the entire Activity Log on every request.
+- Post meta chunks are imported with bulk SQL inserts and larger default chunk sizes to reduce per-row WordPress hook overhead.
+- Batch processing temporarily defers term/comment counting and cache invalidation during hot import loops.
 
 ---
 

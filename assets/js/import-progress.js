@@ -34,6 +34,7 @@
 	function renderCounts( status ) {
 		var imported = status.counts && status.counts.imported ? status.counts.imported : {};
 		var skipped = status.counts && status.counts.skipped ? status.counts.skipped : {};
+		var failed = status.counts && status.counts.failed ? status.counts.failed : {};
 		var total = status.counts && status.counts.total ? status.counts.total : {};
 		var html = '';
 
@@ -43,6 +44,9 @@
 			html += ( imported[ type ] || 0 ) + ' imported';
 			if ( skipped[ type ] ) {
 				html += '<br>' + skipped[ type ] + ' skipped';
+			}
+			if ( failed[ type ] ) {
+				html += '<br><span class="better-importer-count-failed">' + failed[ type ] + ' failed</span>';
 			}
 			html += '<br><span class="description">' + ( total[ type ] || 0 ) + ' total</span>';
 			html += '</div>';
@@ -116,7 +120,9 @@
 		$( '#better-importer-pause-btn' ).text( isPaused ? betterImporterProgress.strings.resume : betterImporterProgress.strings.pause );
 
 		if ( status.is_complete ) {
-			$( '#better-importer-status-message' ).text( betterImporterProgress.strings.complete );
+			$( '#better-importer-status-message' ).text(
+				status.failed > 0 ? betterImporterProgress.strings.completeWithFailures : betterImporterProgress.strings.complete
+			);
 			$( '#better-importer-complete-actions' ).removeAttr( 'hidden' );
 			stopPolling();
 		} else if ( status.status === 'cancelled' ) {
