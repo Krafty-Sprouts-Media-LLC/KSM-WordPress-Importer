@@ -20,7 +20,7 @@ class Better_Install {
 	 *
 	 * @since 1.0.0
 	 */
-	const DB_VERSION = '1.0.0';
+	const DB_VERSION = '1.1.0';
 
 	/**
 	 * Create or upgrade import database tables.
@@ -104,7 +104,8 @@ class Better_Install {
 			PRIMARY KEY  (id),
 			KEY job_entity (job_id, entity_index),
 			KEY job_status (job_id, status),
-			KEY job_status_step (job_id, status, step)
+			KEY job_status_step (job_id, status, step),
+			KEY job_type_old (job_id, entity_type, old_entity_id)
 		) {$charset_collate};";
 
 		$sql_log = "CREATE TABLE {$log_table} (
